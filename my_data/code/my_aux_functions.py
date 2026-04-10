@@ -9,7 +9,11 @@ import polars as pl
 from tqdm import tqdm
 from sktime.split import ExpandingWindowSplitter
 from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Lasso
+from sklearn.linear_model import ElasticNet
+from sklearn.cross_decomposition import PLSRegression
 from sklearn.metrics import r2_score
+from sklearn.preprocessing import StandardScaler
 import numpy as np
 
 # the 153 characteristics
@@ -837,9 +841,17 @@ def eval_correlation(pred, actual, excntry, test_idx, data_path):
     df = df.merge(meta[["row_id", "eom"]], on="row_id", how="left")
     pear_lst = []
     spear_lst = []
-    for _, month in df.groupby("eom"):  
-        pear_lst.append(month["prediction"].corr(month["actual"]))
-        spear_lst.append(month["prediction"].corr(month["actual"], method = 'spearman'))
+    for _, month in df.groupby("eom"):
+
+        y = month["actual"]
+        x = month["prediction"]
+        
+        if x.std() == 0 or y.std() == 0:
+            print(month)
+            continue
+
+        pear_lst.append(x.corr(y))
+        spear_lst.append(x.corr(y, method = 'spearman'))
     
     pearson = np.nanmean(pear_lst)
     spearman = np.nanmean(spear_lst)
@@ -847,7 +859,159 @@ def eval_correlation(pred, actual, excntry, test_idx, data_path):
     return {"pearson": pearson, "spearman": spearman}
 
 
-def predict_with_OLS(data_path, excntry, pfs, splits_idx):
+def predict_with_ols(X_train,
+                     y_train,
+                      X_test,
+                      y_test,
+                      r2_split,
+                      y_pred_split,
+                      y_true_split):
+
+    
+    lr = LinearRegression().fit(X_train, y_train)
+    y_pred = lr.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+
+    r2_split.setdefault("OLS", []).append(r2)
+    y_pred_split.setdefault("OLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("OLS", []).append(y_test.values.ravel())
+
+
+    
+def predict_with_pls(X_train,
+                     y_train,
+                     X_val,
+                     y_val,
+                     X_train_val,
+                     y_train_val,
+                     X_test,
+                     y_test,
+                     r2_split,
+                     y_pred_split,
+                     y_true_split):
+    
+    max_k = min(20, X_train.shape[1])
+    ncomp = np.arange(1, max_k + 1)
+    best_r2_val = -np.inf
+    best_K_val = None
+
+    for K in ncomp:
+        pls = PLSRegression(n_components=K)
+        pls.fit(X_train, y_train)
+        y_val_pred = pls.predict(X_val) 
+
+        r2_val = r2_score(y_val, y_val_pred)
+
+        if r2_val > best_r2_val:
+            best_r2_val = r2_val
+            best_K_val = K
+
+    print(f"best r2 val: {best_r2_val} with K being {best_K_val}")
+
+    pls_best = PLSRegression(n_components=best_K_val)
+    pls_best.fit(X_train_val, y_train_val)
+    
+    y_pred = pls_best.predict(X_test)
+
+    r2 = r2_score(y_test, y_pred)
+    print(f"r2 pred in this split: {r2}")
+
+    r2_split.setdefault("PLS", []).append(r2)
+    y_pred_split.setdefault("PLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("PLS", []).append(y_test.values.ravel())
+
+def predict_with_lasso(X_train,
+                     y_train,
+                     X_val,
+                     y_val,
+                     X_train_val,
+                     y_train_val,
+                     X_test,
+                     y_test,
+                     r2_split,
+                     y_pred_split,
+                     y_true_split):
+
+    alpha_values = np.logspace(-4, np.log10(0.004), 100)
+    best_r2_val = -np.inf
+    best_alpha_val = None
+
+    for alpha in alpha_values:
+
+        lasso = Lasso(alpha=alpha, max_iter=100000)
+        lasso.fit(X_train, y_train)
+        y_pred_val = lasso.predict(X_val)
+        r2_val = r2_score(y_val, y_pred_val)
+
+        if r2_val > best_r2_val:
+            best_r2_val = r2_val
+            best_alpha_val = alpha
+
+    print(f"best r2_val: {best_r2_val} for alpha: {best_alpha_val}")
+
+    lasso_best = Lasso(alpha=best_alpha_val, max_iter=100000)
+    lasso_best.fit(X_train_val, y_train_val)
+
+    n_total = len(lasso_best.coef_)
+    n_zero = (lasso_best.coef_ == 0).sum()
+
+    print(f"Zero coefficients: {n_zero}/{n_total}")
+
+    y_pred = lasso_best.predict(X_test)
+
+    r2 = r2_score(y_test, y_pred)
+    print(f"r2_pred: {r2} for this split")
+
+
+    r2_split.setdefault("LASSO", []).append(r2)
+    y_pred_split.setdefault("LASSO", []).append(y_pred.ravel())
+    y_true_split.setdefault("LASSO", []).append(y_test.values.ravel())
+
+
+def predict_with_enet(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        r2_split, y_pred_split, y_true_split):
+
+    alpha_values = np.logspace(-6, 0, 100)
+    #np.logspace(-4, np.log10(0.004), 100)
+    best_r2_val = -np.inf
+    best_alpha_val = None
+
+    for alpha in alpha_values:
+
+        enet = ElasticNet(alpha=alpha, l1_ratio= 0.5, max_iter=100000)
+        enet.fit(X_train, y_train)
+        y_pred_val = enet.predict(X_val)
+        r2_val = r2_score(y_val, y_pred_val)
+
+        if r2_val > best_r2_val:
+            best_r2_val = r2_val
+            best_alpha_val = alpha
+
+    print(f"best r2_val: {best_r2_val} for alpha: {best_alpha_val}")
+
+    enet_best = ElasticNet(alpha=best_alpha_val, l1_ratio= 0.5, max_iter=100000)
+    enet_best.fit(X_train_val, y_train_val)
+
+    n_total = len(enet_best.coef_)
+    n_zero = (enet_best.coef_ == 0).sum()
+
+    print(f"Zero coefficients: {n_zero}/{n_total}")
+
+    y_pred = enet_best.predict(X_test)
+
+    r2 = r2_score(y_test, y_pred)
+    print(f"r2_pred: {r2} for this split")
+
+
+    r2_split.setdefault("ENET", []).append(r2)
+    y_pred_split.setdefault("ENET", []).append(y_pred.ravel())
+    y_true_split.setdefault("ENET", []).append(y_test.values.ravel())
+
+def train_pred_model(data_path, excntry, pfs, splits_idx, model = "all"):
     
     X = pl.read_parquet(
             data_path/"factor_characteristics"/f"{excntry}_{pfs}_feature.parquet"
@@ -858,58 +1022,119 @@ def predict_with_OLS(data_path, excntry, pfs, splits_idx):
             ).to_pandas()
     
     y_series = y["ret_exc_lead1m_vw_cap"]
-        
-    r2_split_ols = []
-    y_pred_split_ols = []
-    y_true_split_ols = []
+
+    r2_split = {}
+    y_pred_split = {}
+    y_true_split = {}
     test_idx_split = []
 
-    for splits in splits_idx:
-        
-        train_index = np.concatenate([splits["train"], splits["val"]])
-        test_index = splits["test"]
+    if model == "all":
+        models_to_run = ["OLS", "PLS", "LASSO", "ENET"]
+    elif isinstance(model, str):
+        models_to_run = [model.upper()]
+    else:
+        models_to_run = [m.upper() for m in model]
+
+    for split in splits_idx:
+
+        train_index = split["train"]
+        val_index = split["val"]
+        test_index = split["test"]
+        train_val_index = np.concatenate([train_index, val_index])
 
         X_train = X.iloc[train_index]
-        y_train = y_series.iloc[train_index]
-
+        X_val = X.iloc[val_index]
+        X_train_val = X.iloc[train_val_index]
         X_test = X.iloc[test_index]
+        
+        scaler_cv = StandardScaler()
+        X_train = scaler_cv.fit_transform(X_train)
+        X_val = scaler_cv.transform(X_val)
+
+        scaler_best = StandardScaler()
+        X_train_val = scaler_best.fit_transform(X_train_val)
+        X_test = scaler_best.transform(X_test)
+
+        y_train = y_series.iloc[train_index]
+        y_val = y_series.iloc[val_index]
+        y_train_val = y_series.iloc[train_val_index]
         y_test = y_series.iloc[test_index]
 
-        lr = LinearRegression().fit(X_train, y_train)
-        y_pred = lr.predict(X_test)
-        r2 = r2_score(y_test, y_pred)
-
-        r2_split_ols.append(r2)
-        y_pred_split_ols.append(y_pred)
-        y_true_split_ols.append(y_test.values)
         test_idx_split.append(test_index)
+        
+        if "OLS" in models_to_run:
+            predict_with_ols(
+                X_train=X_train_val, y_train=y_train_val,
+                X_test=X_test, y_test=y_test,
+                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
+            
+        if "PLS" in models_to_run:
+            predict_with_pls(
+                X_train=X_train,y_train=y_train,
+                X_val=X_val, y_val=y_val,
+                X_train_val=X_train_val,y_train_val=y_train_val,
+                X_test=X_test, y_test=y_test,
+                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
+            
+        if "LASSO" in models_to_run:
+            predict_with_lasso(
+                X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val,
+                X_train_val=X_train_val, y_train_val=y_train_val,
+                X_test=X_test, y_test=y_test,
+                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
 
-        print(f"OOS r2 :{r2}\n")
+        if "ENET" in models_to_run:
+            predict_with_enet(
+                X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val,
+                X_train_val=X_train_val, y_train_val=y_train_val,
+                X_test=X_test, y_test=y_test,
+                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
 
-    y_pred_all_ols = np.concatenate(y_pred_split_ols)
-    y_true_all_ols = np.concatenate(y_true_split_ols)
+    return r2_split, y_pred_split, y_true_split, test_idx_split
+
+def eval_model(
+        data_path, pfs, r2_split, y_pred_split, y_true_split, test_idx_split, excntry):
+    
+    results = []
+
     test_idx_all = np.concatenate(test_idx_split)
 
-    out = eval_correlation(
-        y_pred_all_ols, y_true_all_ols, excntry, test_idx_all, data_path)
-    
-    pear_corr = out["pearson"]
-    spear_corr = out["spearman"]
-    r2_all_ols = r2_score(y_true_all_ols, y_pred_all_ols)
+    for model in y_pred_split.keys():
 
-    return {
+        y_pred_all = np.concatenate(y_pred_split[model])
+        y_true_all = np.concatenate(y_true_split[model])
+
+        r2_all = r2_score(y_true_all, y_pred_all)
+        
+        out_corr = eval_correlation(y_pred_all, y_true_all, excntry, test_idx_all, data_path)
+        
+        results.append({
         "country": excntry,
         "pfs": pfs,
-        "model": "OLS",
-        "y_pred": y_pred_all_ols,
-        "y_true": y_true_all_ols,
-        "r2": r2_all_ols,
-        "r2_split": r2_split_ols,
-        "spearman": spear_corr,
-        "pearson": pear_corr
-    }
+        "model": model,
+        "y_pred": y_pred_all,
+        "y_true": y_true_all,
+        "test_idx": test_idx_all,
+        "r2": r2_all,
+        "r2_split": r2_split.get(model, []),
+        "spearman": out_corr["spearman"],
+        "pearson": out_corr["pearson"]})
+        
+    return results
 
-#def predict_with_pls(data_path, excntry, pfs, splits_idx)
+
+
+
+    
+
+
+
+
+
+
+
 
 
 

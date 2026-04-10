@@ -1,8 +1,8 @@
 #%% Scripthead
 import polars as pl
 from pathlib import Path
+import pandas as pd
 import os
-
 
 from my_aux_functions import(
     setup_folder_structure,
@@ -13,8 +13,9 @@ from my_aux_functions import(
     factor_returns,
     build_factor_characteristics,
     build_train_val_test_idx,
-    predict_with_OLS,
-    predict_with_pls)
+    train_pred_model,
+    eval_model)
+
 
 from my_wrds_credentials import get_wrds_credentials
 
@@ -47,7 +48,6 @@ for ex in countries:
 #%%
 for ex in countries:
     print(ex)
-
     build_factor_characteristics(data_path=DATA_DIR, excntry=ex, pfs=3)
 # %%
 splits_idx = {}
@@ -68,36 +68,30 @@ for ex in countries:
     
     splits_idx[ex] = splits
 #%%
-for ex in countries:
-    print(ex)
-
-    if ex in splits_idx:
-        out_ols = predict_with_OLS(
-            excntry=ex,
-            data_path=DATA_DIR,
-            pfs= 3,
-            splits_idx=splits_idx[ex])
+all_results = []
+for cntry in countries:
+    if cntry in splits_idx:
         
-        out_pls = predict_with_pls(
-            excntry=ex,
+        print(cntry)
+
+        r2_split, y_pred_split, y_true_split, test_idx_split = train_pred_model(
             data_path=DATA_DIR,
-            pfs= 3,
-            splits_idx=splits_idx[ex])
-
-    
-
-
-
-
-
-
-
+            excntry=cntry,
+            pfs=3,
+            splits_idx=splits_idx[cntry],
+            model="all")
         
+        oos_results = eval_model(data_path=DATA_DIR, pfs=3, excntry=cntry,
+                                 r2_split=r2_split,
+                                 y_pred_split=y_pred_split,
+                                 y_true_split=y_true_split,
+                                 test_idx_split=test_idx_split)
+        
+        all_results.extend(oos_results)
+        df_results = pd.DataFrame(all_results)
 
 
-
-
-
+df_results[df_results["country"] == "USA"]
 
 # X_numerical = X.select_dtypes(include="number").copy()
 # display(X_numerical.describe(include = "all").T)
