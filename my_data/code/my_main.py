@@ -3,6 +3,8 @@ import polars as pl
 from pathlib import Path
 import pandas as pd
 import os
+from my_wrds_credentials import get_wrds_credentials
+
 
 from my_aux_functions import(
     setup_folder_structure,
@@ -14,19 +16,17 @@ from my_aux_functions import(
     build_factor_characteristics,
     build_train_val_test_idx,
     train_pred_model,
-    eval_model)
-
-
-from my_wrds_credentials import get_wrds_credentials
+    eval_model,
+    build_strategy_returns)
 
 BASE_DIR = Path.home()/"Desktop"/"Master_Thesis"/"my_data"
 CODE_DIR = BASE_DIR / "code"
 DATA_DIR = BASE_DIR / "data"
-#%% Get Credentials 
-creds = get_wrds_credentials()
 setup_folder_structure(data_path=DATA_DIR)
 #%%
+creds = get_wrds_credentials()
 download_stock_characteristics(username=creds.username, password=creds.password, data_path=DATA_DIR)
+download_ff_monthly(username=creds.username, password=creds.password, data_path=DATA_DIR) #EDIT HERE!!
 #%%
 countries = get_countries(data_path=DATA_DIR)
 nyse_size_cutoffs(data_path=DATA_DIR)
@@ -48,8 +48,10 @@ for ex in countries:
 #%%
 for ex in countries:
     print(ex)
-    build_factor_characteristics(data_path=DATA_DIR, excntry=ex, pfs=3)
-# %%
+    build_factor_characteristics(data_path=DATA_DIR,
+                                excntry=ex,
+                                pfs=3)
+#%%
 splits_idx = {}
 
 for ex in countries:
@@ -79,7 +81,7 @@ for cntry in countries:
             excntry=cntry,
             pfs=3,
             splits_idx=splits_idx[cntry],
-            model="all")
+            model=["ols"])
         
         oos_results = eval_model(data_path=DATA_DIR, pfs=3, excntry=cntry,
                                  r2_split=r2_split,
@@ -92,11 +94,21 @@ for cntry in countries:
 
 
 df_results[df_results["country"] == "USA"]
+#%%
+for cntry in countries:
+     meta_path = DATA_DIR/"factor_characteristics"/f"{cntry}_meta.parquet"
+     for pfs in [3]:
+         model_path = DATA_DIR/"ml_model_output"/f"{cntry}_{pfs}_ml_models.parquet"
+         if model_path.exists():
+            build_strategy_returns(
+                data_path=DATA_DIR,
+                model_path = model_path,
+                meta_path = meta_path,
+                excntry = cntry,
+                pfs = pfs,
+                n_buckets=10)
 
-# X_numerical = X.select_dtypes(include="number").copy()
-# display(X_numerical.describe(include = "all").T)
+ #%%
 
 
-# %%
 
-# %%

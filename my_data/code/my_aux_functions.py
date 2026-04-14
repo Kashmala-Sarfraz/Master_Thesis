@@ -8,10 +8,11 @@ import pandas as pd
 import polars as pl
 from tqdm import tqdm
 from sktime.split import ExpandingWindowSplitter
-from sklearn.linear_model import LinearRegression
-from sklearn.linear_model import Lasso
-from sklearn.linear_model import ElasticNet
+from sklearn.linear_model import Lasso, Ridge, ElasticNet, LinearRegression
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.neural_network import MLPRegressor
 from sklearn.cross_decomposition import PLSRegression
+from xgboost import XGBRegressor
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 import numpy as np
@@ -236,6 +237,7 @@ def setup_folder_structure(data_path):
     (data_path/"portfolio_returns").mkdir(parents=True, exist_ok=True)
     (data_path/"other_input").mkdir(parents=True, exist_ok=True)
     (data_path/"factor_characteristics").mkdir(parents=True, exist_ok=True)
+    (data_path/"ml_model_output").mkdir(parents=True, exist_ok=True)
 
 def gen_wrds_connection_info(username, password):
     return (
@@ -357,7 +359,7 @@ def download_stock_characteristics(username, password, data_path):
     lib, table = table_name.split(".") 
     # a projection is the list of columns that you choose in a SELECT statement
 
-    countries = ['USA', 'BRA', 'CHN', 'GBR', 'DEU', 'JPN', 'IND']
+    countries = ['USA', 'JPN', 'BRA', 'CHN', 'GBR', 'DEU', 'IND']
 
     year_country_dict = year_country_map(
         data_path = data_path,
@@ -764,7 +766,8 @@ def build_factor_characteristics(data_path, pfs, excntry):
 
         all = left_market.join(right_pivot, on="eom", how="left")
 
-        to_clean_cols = [c for c in all.columns if c.startswith(("ret_m_", "ret_y_", "vol_m_", "beta_"))]
+        to_clean_cols = [c for c in all.columns if (
+            c.startswith(("ret_m_", "ret_y_", "vol_m_", "beta_")) or c.endswith("_spread"))]
         all = all.filter(
             pl.all_horizontal([pl.col(c).is_not_null() for c in to_clean_cols]))
         
@@ -827,16 +830,10 @@ def build_train_val_test_idx(data_path, excntry, min_train_val, val, test_range,
         
     return expand_wind_splits
 
-def eval_correlation(pred, actual, excntry, test_idx, data_path):
+def eval_correlation(df, excntry, data_path):
 
     meta = pl.read_parquet(
         data_path/"factor_characteristics"/f"{excntry}_meta.parquet").to_pandas()
-    
-    df = pd.DataFrame({
-        "row_id": test_idx,
-        "prediction": pred,
-        "actual": actual
-        })
     
     df = df.merge(meta[["row_id", "eom"]], on="row_id", how="left")
     pear_lst = []
@@ -872,12 +869,13 @@ def predict_with_ols(X_train,
     y_pred = lr.predict(X_test)
     r2 = r2_score(y_test, y_pred)
 
+    print(f"ols - r2_pred: {r2} for this split")
+
     r2_split.setdefault("OLS", []).append(r2)
     y_pred_split.setdefault("OLS", []).append(y_pred.ravel())
     y_true_split.setdefault("OLS", []).append(y_test.values.ravel())
 
 
-    
 def predict_with_pls(X_train,
                      y_train,
                      X_val,
@@ -890,8 +888,7 @@ def predict_with_pls(X_train,
                      y_pred_split,
                      y_true_split):
     
-    max_k = min(20, X_train.shape[1])
-    ncomp = np.arange(1, max_k + 1)
+    ncomp = np.arange(1, 11) 
     best_r2_val = -np.inf
     best_K_val = None
 
@@ -906,7 +903,7 @@ def predict_with_pls(X_train,
             best_r2_val = r2_val
             best_K_val = K
 
-    print(f"best r2 val: {best_r2_val} with K being {best_K_val}")
+    print(f"pls - best r2 val: {best_r2_val} for K:{best_K_val}")
 
     pls_best = PLSRegression(n_components=best_K_val)
     pls_best.fit(X_train_val, y_train_val)
@@ -914,7 +911,7 @@ def predict_with_pls(X_train,
     y_pred = pls_best.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
-    print(f"r2 pred in this split: {r2}")
+    print(f"pls - r2_pred: {r2} for this split")
 
     r2_split.setdefault("PLS", []).append(r2)
     y_pred_split.setdefault("PLS", []).append(y_pred.ravel())
@@ -932,7 +929,8 @@ def predict_with_lasso(X_train,
                      y_pred_split,
                      y_true_split):
 
-    alpha_values = np.logspace(-4, np.log10(0.004), 100)
+    #alpha_values = [0.002]
+    alpha_values = np.logspace(-4, np.log10(0.002), 100)
     best_r2_val = -np.inf
     best_alpha_val = None
 
@@ -947,7 +945,7 @@ def predict_with_lasso(X_train,
             best_r2_val = r2_val
             best_alpha_val = alpha
 
-    print(f"best r2_val: {best_r2_val} for alpha: {best_alpha_val}")
+    print(f"lasso - best r2_val: {best_r2_val} for alpha: {best_alpha_val}")
 
     lasso_best = Lasso(alpha=best_alpha_val, max_iter=100000)
     lasso_best.fit(X_train_val, y_train_val)
@@ -960,7 +958,7 @@ def predict_with_lasso(X_train,
     y_pred = lasso_best.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
-    print(f"r2_pred: {r2} for this split")
+    print(f"lasso - r2_pred: {r2} for this split")
 
 
     r2_split.setdefault("LASSO", []).append(r2)
@@ -968,32 +966,68 @@ def predict_with_lasso(X_train,
     y_true_split.setdefault("LASSO", []).append(y_test.values.ravel())
 
 
-def predict_with_enet(
+def predict_with_ridge(
         X_train, y_train,
         X_val, y_val,
         X_train_val, y_train_val,
         X_test, y_test,
         r2_split, y_pred_split, y_true_split):
 
-    alpha_values = np.logspace(-6, 0, 100)
-    #np.logspace(-4, np.log10(0.004), 100)
+    alpha_values = np.logspace(-4, 4, 100)
     best_r2_val = -np.inf
-    best_alpha_val = None
+    best_alpha = None
 
     for alpha in alpha_values:
-
-        enet = ElasticNet(alpha=alpha, l1_ratio= 0.5, max_iter=100000)
-        enet.fit(X_train, y_train)
-        y_pred_val = enet.predict(X_val)
+        ridge = Ridge(alpha=alpha)
+        ridge.fit(X_train, y_train)
+        y_pred_val = ridge.predict(X_val)
         r2_val = r2_score(y_val, y_pred_val)
 
         if r2_val > best_r2_val:
             best_r2_val = r2_val
-            best_alpha_val = alpha
+            best_alpha = alpha
 
-    print(f"best r2_val: {best_r2_val} for alpha: {best_alpha_val}")
+    print(f"ridge - best r2_val: {best_r2_val} for alpha: {best_alpha}")
 
-    enet_best = ElasticNet(alpha=best_alpha_val, l1_ratio= 0.5, max_iter=100000)
+    ridge_best = Ridge(alpha=best_alpha)
+    ridge_best.fit(X_train_val, y_train_val)
+
+    y_pred = ridge_best.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    print(f"ridge - r2_pred: {r2} for this split")
+
+    r2_split.setdefault("RIDGE", []).append(r2)
+    y_pred_split.setdefault("RIDGE", []).append(y_pred.ravel())
+    y_true_split.setdefault("RIDGE", []).append(y_test.values.ravel())
+
+def predict_with_enet(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        r2_split, y_pred_split, y_true_split):
+    
+    alpha_values = np.logspace(-4, 0, 100)
+    #alpha_values = np.logspace(-4, np.log10(0.003), 100)
+    #alpha_values = [0.002]
+    best_r2_val = -np.inf
+    best_param = None
+
+    for alpha in alpha_values:
+        for l1 in [0.1, 0.3, 0.5, 0.7, 0.9]:
+
+            enet = ElasticNet(alpha=alpha, l1_ratio= l1, max_iter=100000)
+            enet.fit(X_train, y_train)
+            y_pred_val = enet.predict(X_val)
+            r2_val = r2_score(y_val, y_pred_val)
+
+            if r2_val > best_r2_val:
+                best_r2_val = r2_val
+                best_param = (alpha, l1)
+
+    print(f"enet - best r2_val: {best_r2_val} for alpha: {best_param}")
+    best_alpha, best_l1 = best_param
+    enet_best = ElasticNet(alpha=best_alpha, l1_ratio=best_l1, max_iter=100000)
     enet_best.fit(X_train_val, y_train_val)
 
     n_total = len(enet_best.coef_)
@@ -1004,12 +1038,248 @@ def predict_with_enet(
     y_pred = enet_best.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
-    print(f"r2_pred: {r2} for this split")
-
+    print(f"enet - r2_pred: {r2} for this split")
 
     r2_split.setdefault("ENET", []).append(r2)
     y_pred_split.setdefault("ENET", []).append(y_pred.ravel())
     y_true_split.setdefault("ENET", []).append(y_test.values.ravel())
+
+
+def predict_with_rf(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        r2_split, y_pred_split, y_true_split):
+
+    best_r2_val = -np.inf
+    best_param = None
+
+    for n_est in [100, 150, 200, 300]:
+        for max_d in [2, 3, 4, 5]:
+            for min_l in [5, 10, 20]:
+                for max_f in ["sqrt", 0.3, 0.5]:
+
+                    rf = RandomForestRegressor(
+                        n_estimators=n_est,
+                        max_depth=max_d,
+                        min_samples_leaf=min_l,
+                        max_features=max_f,
+                        random_state=42)
+                    
+                    rf.fit(X_train, y_train)
+                    y_pred_val = rf.predict(X_val)
+                    r2_val = r2_score(y_val, y_pred_val)
+                    
+                    if r2_val > best_r2_val:
+                        best_r2_val = r2_val
+                        best_param = (n_est, max_d, min_l, max_f)
+
+    print(f"rf - best r2_val: {best_r2_val} for parameters: {best_param}")
+
+    best_n_est, best_max_d, best_min_l, best_max_f = best_param
+    rf_best = RandomForestRegressor(
+        n_estimators=best_n_est,
+        max_depth=best_max_d,
+        min_samples_leaf=best_min_l,
+        max_features=best_max_f,
+        random_state=42)
+    
+    rf_best.fit(X_train_val, y_train_val)
+    y_pred = rf_best.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    print(f"rf - r2_pred: {r2} for this split")
+
+    r2_split.setdefault("RF", []).append(r2)
+    y_pred_split.setdefault("RF", []).append(y_pred.ravel())
+    y_true_split.setdefault("RF", []).append(y_test.values.ravel())
+
+def predict_with_gbrt(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        r2_split, y_pred_split, y_true_split):
+
+    best_r2_val = -np.inf
+    best_param = None
+
+    for lr in [0.01, 0.02, 0.05]:
+        for n_est in [100, 150, 200, 300, 400, 600]:
+            for max_d in [2, 3, 5, 7]:
+                for min_l in [5, 10, 20]:
+                    for max_f in [0.3, 0.5, "sqrt"]:
+                        
+                        gbrt = GradientBoostingRegressor(
+                            learning_rate= lr,
+                            n_estimators=n_est,
+                            max_depth=max_d,
+                            min_samples_leaf=min_l,
+                            max_features=max_f,
+                            random_state=42)
+                        
+                        gbrt.fit(X_train, y_train)
+                        y_pred_val = gbrt.predict(X_val)
+                        r2_val = r2_score(y_val, y_pred_val)
+                        
+                        if r2_val > best_r2_val:
+                            best_r2_val = r2_val
+                            best_param = (lr, n_est, max_d, min_l, max_f)
+
+    print(f"gbrt - best r2_val: {best_r2_val} for parameters: {best_param}")
+
+    best_lr, best_n_est, best_max_d, best_min_l, best_max_f = best_param
+
+    gbrt_best = GradientBoostingRegressor(
+        learning_rate=best_lr,
+        n_estimators=best_n_est,
+        max_depth=best_max_d,
+        min_samples_leaf=best_min_l,
+        max_features=best_max_f,
+        random_state=42)
+    
+    gbrt_best.fit(X_train_val, y_train_val)
+    y_pred = gbrt_best.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    print(f"gbrt - r2_pred: {r2} for this split")
+
+    r2_split.setdefault("GBRT", []).append(r2)
+    y_pred_split.setdefault("GBRT", []).append(y_pred.ravel())
+    y_true_split.setdefault("GBRT", []).append(y_test.values.ravel())
+
+def predict_with_xgb(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        r2_split, y_pred_split, y_true_split):
+
+    best_r2_val = -np.inf
+    best_param = None
+
+    for lr in [0.01, 0.03, 0.05]:
+        for n_est in [200, 300, 500]:
+            for max_d in [3, 5, 7]:
+                for subs in [0.6, 0.8, 1.0]:
+                    for colsample in [0.6, 0.8, 1.0]:
+
+                        xgb = XGBRegressor(
+                            learning_rate=lr,
+                            n_estimators=n_est,
+                            max_depth=max_d,
+                            subsample=subs,
+                            colsample_bytree=colsample,
+                            reg_lambda=1.0,
+                            reg_alpha=0.0,
+                            random_state=42,
+                            n_jobs=-1
+                        )
+
+                        xgb.fit(X_train, y_train)
+                        y_pred_val = xgb.predict(X_val)
+                        r2_val = r2_score(y_val, y_pred_val)
+
+                        if r2_val > best_r2_val:
+                            best_r2_val = r2_val
+                            best_param = (lr, n_est, max_d, subs, colsample)
+
+    print(f"xgb - best r2_val: {best_r2_val} for parameters: {best_param}")
+
+    best_lr, best_n_est, best_max_d, best_subs, best_colsample = best_param
+
+    xgb_best = XGBRegressor(
+        learning_rate=best_lr,
+        n_estimators=best_n_est,
+        max_depth=best_max_d,
+        subsample=best_subs,
+        colsample_bytree=best_colsample,
+        reg_lambda=1.0,
+        reg_alpha=0.0,
+        random_state=42,
+        n_jobs=-1
+    )
+
+    xgb_best.fit(X_train_val, y_train_val)
+
+    y_pred = xgb_best.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    print(f"xgb - r2_pred: {r2} for this split")
+
+    r2_split.setdefault("XGB", []).append(r2)
+    y_pred_split.setdefault("XGB", []).append(y_pred.ravel())
+    y_true_split.setdefault("XGB", []).append(y_test.values.ravel())
+
+def predict_with_ffnn(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        r2_split, y_pred_split, y_true_split):
+    
+    best_r2_val = -np.inf
+    best_param = None
+
+    for lr in [1e-4, 5e-4, 1e-3]: 
+        for alpha in [1e-5, 1e-4, 1e-3, 1e-2]: 
+            ffnn = MLPRegressor(
+                hidden_layer_sizes=(8,),   
+                activation="relu",        
+                solver="adam",            
+                learning_rate_init=lr,
+                alpha=alpha,               
+                max_iter=500,
+                random_state=42,
+                early_stopping=True)
+            
+            ffnn.fit(X_train, y_train)
+            y_pred_val = ffnn.predict(X_val)
+            r2_val = r2_score(y_val, y_pred_val)
+            
+            if r2_val > best_r2_val:
+                best_r2_val = r2_val
+                best_param = (lr, alpha)
+
+    print(f"ffnn - best r2_val: {best_r2_val} for parameters: {best_param}")
+
+    best_lr, best_alpha = best_param
+    
+    ffnn_best = MLPRegressor(
+                hidden_layer_sizes=(8,),   
+                activation="relu",        
+                solver="adam",            
+                learning_rate_init=best_lr,
+                alpha=best_alpha,               
+                max_iter=500,
+                random_state=42,
+                early_stopping=True)
+    
+    ffnn_best.fit(X_train_val, y_train_val)
+    y_pred = ffnn_best.predict(X_test)
+    r2 = r2_score(y_test, y_pred)
+    print(f"ffnn - r2_pred: {r2} for this split")
+
+    r2_split.setdefault("FFNN", []).append(r2)
+    y_pred_split.setdefault("FFNN", []).append(y_pred.ravel())
+    y_true_split.setdefault("FFNN", []).append(y_test.values.ravel())
+
+def predict_with_comb(y_pred_split, y_true_split, r2_split, base_models):
+
+    base_models = [m for m in base_models if m != "COMB"]
+    lengths = [len(y_pred_split[m]) for m in base_models]
+    assert len(set(lengths)) == 1, "mismatch in splits across models"
+
+    y_pred_split_latest = [y_pred_split[m][-1] for m in base_models]
+    
+    y_pred_comb = np.vstack(y_pred_split_latest)
+    y_pred = y_pred_comb.mean(axis=0)
+    y_test = y_true_split[base_models[0]][-1]
+    
+    r2 = r2_score(y_test, y_pred)
+    print(f"comb - r2_pred: {r2} for this split")
+
+    r2_split.setdefault("COMB", []).append(r2)
+    y_pred_split.setdefault("COMB", []).append(y_pred.ravel())
+    y_true_split.setdefault("COMB", []).append(y_test.ravel())
 
 def train_pred_model(data_path, excntry, pfs, splits_idx, model = "all"):
     
@@ -1029,7 +1299,7 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model = "all"):
     test_idx_split = []
 
     if model == "all":
-        models_to_run = ["OLS", "PLS", "LASSO", "ENET"]
+        models_to_run = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "FFNN", "COMB"]
     elif isinstance(model, str):
         models_to_run = [model.upper()]
     else:
@@ -1083,6 +1353,14 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model = "all"):
                 X_train_val=X_train_val, y_train_val=y_train_val,
                 X_test=X_test, y_test=y_test,
                 r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
+            
+        if "RIDGE" in models_to_run:
+            predict_with_ridge(
+            X_train=X_train, y_train=y_train,
+            X_val=X_val, y_val=y_val,
+            X_train_val=X_train_val, y_train_val=y_train_val,
+            X_test=X_test, y_test=y_test,
+            r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
 
         if "ENET" in models_to_run:
             predict_with_enet(
@@ -1091,6 +1369,46 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model = "all"):
                 X_train_val=X_train_val, y_train_val=y_train_val,
                 X_test=X_test, y_test=y_test,
                 r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
+        
+        if "RF" in models_to_run:
+            predict_with_rf(
+                X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val,
+                X_train_val=X_train_val, y_train_val=y_train_val,
+                X_test=X_test, y_test=y_test,
+                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
+        
+        if "GBRT" in models_to_run:
+            predict_with_gbrt(
+                X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val,
+                X_train_val=X_train_val, y_train_val=y_train_val,
+                X_test=X_test, y_test=y_test,
+                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
+        
+        if "FFNN" in models_to_run:
+            predict_with_ffnn( 
+                X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val,
+                X_train_val=X_train_val, y_train_val=y_train_val,
+                X_test=X_test, y_test=y_test,
+                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
+            
+        if "XGB" in models_to_run:
+            predict_with_xgb(
+                X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val,
+                X_train_val=X_train_val, y_train_val=y_train_val,
+                X_test=X_test, y_test=y_test,
+                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
+            
+        if "COMB" in models_to_run:
+            predict_with_comb(
+                y_pred_split=y_pred_split,
+                y_true_split=y_true_split,
+                r2_split=r2_split,
+                base_models=models_to_run)
+
 
     return r2_split, y_pred_split, y_true_split, test_idx_split
 
@@ -1098,6 +1416,7 @@ def eval_model(
         data_path, pfs, r2_split, y_pred_split, y_true_split, test_idx_split, excntry):
     
     results = []
+    all_models_out = []
 
     test_idx_all = np.concatenate(test_idx_split)
 
@@ -1108,7 +1427,16 @@ def eval_model(
 
         r2_all = r2_score(y_true_all, y_pred_all)
         
-        out_corr = eval_correlation(y_pred_all, y_true_all, excntry, test_idx_all, data_path)
+        model_out = pd.DataFrame({
+            "row_id": test_idx_all,
+            "prediction": y_pred_all,
+            "actual": y_true_all,
+            "model": model,
+            "excntry":excntry,
+            "pfs": pfs}
+        )
+        
+        out_corr = eval_correlation(df=model_out, excntry=excntry, data_path=data_path)
         
         results.append({
         "country": excntry,
@@ -1121,17 +1449,104 @@ def eval_model(
         "r2_split": r2_split.get(model, []),
         "spearman": out_corr["spearman"],
         "pearson": out_corr["pearson"]})
+
+        out_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_ml_models.parquet"
+        model_out.to_parquet(out_path, index=False)
         
     return results
 
 
+def build_strategy_returns(
+        data_path, model_path, meta_path, excntry, pfs, n_buckets):
 
+        monthly_lst = []
+        global_lst = []
+        bucket_lst = []
 
+        ml_out = pl.read_parquet(model_path)
+        meta = pl.read_parquet(meta_path)
+        eom_pred = ml_out.join(meta["row_id", "eom"], on="row_id", how="left")
+
+        models = eom_pred.select("model").unique().to_series().to_list()
+
+        for model in models:
+
+            ml_buckets = (
+                eom_pred
+                .filter(pl.col("model") == model)
+                .with_columns(
+                    pl.col("prediction")
+                    .rank(method="ordinal").over("eom").alias("rank"))
+                .with_columns(
+                    ((
+                        (pl.col("rank") - 1) / pl.len().over("eom")*n_buckets
+                        ).floor().cast(pl.Int64) + 1
+                        ).alias("bucket"))
+                )
+            
+            port_ret_monthly = (
+                ml_buckets
+                .group_by("eom", "bucket")
+                .agg(pl.col("actual").mean().alias("mean_ret_bucket_monthly"))
+                .with_columns(pl.lit(model).alias("model"))
+                .with_columns(pl.lit(excntry).alias("excntry"))
+                .with_columns(pl.lit(pfs).alias("pfs"))
+                )
+            
+            port_ret_monthly = (
+                port_ret_monthly
+                .with_columns(
+                    (pl.col("mean_ret_bucket_monthly")
+                    .filter(pl.col("bucket") == n_buckets)
+                    .first()
+                    .over("eom")
+                    -
+                    pl.col("mean_ret_bucket_monthly")
+                    .filter(pl.col("bucket") == 1)
+                    .first()
+                    .over("eom")
+                ).alias("hml_ret_monthly")
+            ))
+
+            port_ret_global = (
+                ml_buckets
+                .group_by("bucket")
+                .agg(pl.col("actual").mean().alias("mean_ret_bucket_global"))
+                .with_columns(pl.lit(model).alias("model"))
+                .with_columns(pl.lit(excntry).alias("excntry"))
+                .with_columns(pl.lit(pfs).alias("pfs"))
+            )
+
+            port_ret_global = (
+                port_ret_global
+                .with_columns(
+                    (pl.col("mean_ret_bucket_global")
+                    .filter(pl.col("bucket") == n_buckets)
+                    .first()
+                    -
+                    pl.col("mean_ret_bucket_global")
+                    .filter(pl.col("bucket") == 1)
+                    .first()
+                ).alias("hml_ret_global")
     
+            ))
+            
+            bucket_lst.append(ml_buckets)
+            monthly_lst.append(port_ret_monthly)
+            global_lst.append(port_ret_global)
 
+        
+        all_port_ret_bucket = pl.concat(bucket_lst)
+        out_path_buck = data_path/"portfolio_returns"/f"{excntry}_{pfs}_port_ret_bucket.parquet"
+        all_port_ret_bucket.write_parquet(out_path_buck)
 
+        all_port_ret_monthly = pl.concat(monthly_lst)
+        out_path_mon = data_path/"portfolio_returns"/f"{excntry}_{pfs}_port_ret_monthly_avg.parquet"
+        all_port_ret_monthly.write_parquet(out_path_mon)
 
-
+        all_port_ret_global = pl.concat(global_lst)
+        out_path_gl = data_path/"portfolio_returns"/f"{excntry}_{pfs}_port_ret_global_avg.parquet"
+        all_port_ret_global.write_parquet(out_path_gl)
 
 
 
