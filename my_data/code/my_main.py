@@ -37,10 +37,11 @@ ret_cutoffs = pl.read_parquet(DATA_DIR/"other_input"/"return_cutoffs.parquet")
 ret_cutoffs = ret_cutoffs.with_columns((pl.col("eom").dt.month_start().dt.offset_by("-1d")).alias("eom_lag1"))
 #%% 
 # Create stock level portfolios
+lms_ret = {}
 for ex in ["USA"]:
-    for pfs in [3]: #, 4, 10
+    for pfs in [10]: #3, 4, 10
         print(ex)
-        factor_returns(
+        lms_ret[(ex, pfs)] = factor_returns(
             data_path=DATA_DIR,
             excntry=ex,
             nyse_cutoffs_df=nyse_cutoffs,
@@ -49,18 +50,22 @@ for ex in ["USA"]:
             pfs=pfs)
 #%% 
 # Build feature and target      
+feature = {}
+target = {}
+
 for ex in ["USA"]:
-    for pfs in [3]: #, 4, 10
-        for adjust in [0, 1]:
-            build_factor_characteristics(
-            data_path=DATA_DIR, excntry=ex, pfs=pfs, adj=adjust)
+    for pfs in [10]: #3, 4, 10
+        for adjust in [0, 1, 2]:
+            feature[(ex, pfs, adjust)], target [(ex, pfs, adjust)] = build_factor_characteristics(
+                data_path=DATA_DIR, excntry=ex, pfs=pfs, adj=adjust)
 
 #%% 
 # Define train, val and test periods
 splits_idx = {}
+
 for cntry in ["USA"]:  # , "JPN"
-    for pfs in [3]:  # , 4, 10
-        for adjust in [0, 1]:
+    for pfs in [10]:  #3 , 4, 10
+        for adjust in [0, 1, 2]:
 
             print(f"ADJUSTMENT: {adjust}")
 
@@ -81,41 +86,35 @@ for cntry in ["USA"]:  # , "JPN"
             splits_idx[(cntry, pfs, adjust)] = splits
 #%% Train models and evaluate performance
 
+ml_pred = {}
+ml_imp = {}
+ml_pred_gl = {}
+ml_imp_gl = {}
+
 for cntry in ["USA"]: #, "JPN"
-        for pfs in [3]: #, 4, 10
-            for adjust in [0, 1]:
+        for pfs in [10]: #, 4, 10
+            for adjust in [0, 1, 2]:
             
                 print(cntry)
                 
                 if (cntry, pfs, adjust) not in splits_idx:
                     continue
 
-                r2_split, y_pred_split, y_true_split, test_idx_split, vi_split = train_pred_model(
-                    data_path=DATA_DIR,
-                    excntry=cntry,
-                    pfs=pfs,
+                ml_pred[(cntry, pfs, adjust)], ml_imp[(cntry, pfs, adjust)] = train_pred_model(
+                    data_path=DATA_DIR, excntry=cntry, pfs=pfs, adj=adjust,
                     splits_idx=splits_idx[cntry, pfs, adjust],
-                    model= "all", 
-                    adj=adjust)
+                    model= ["ols", "logit_cls"])
                 
-                eval_model(
-                    data_path=DATA_DIR,
-                    pfs=pfs,
-                    excntry=cntry,
-                    vi_split=vi_split,
-                    r2_split=r2_split,
-                    y_pred_split=y_pred_split,
-                    y_true_split=y_true_split,
-                    test_idx_split=test_idx_split,
-                    adj=adjust)
+                ml_pred_gl[(cntry, pfs, adjust)], ml_imp_gl[(cntry, pfs, adjust)] = eval_model(
+                     data_path=DATA_DIR, pfs=pfs, excntry=cntry, adj=adjust)
                 
-                monthly_df, global_df = add_comb_model(data_path=DATA_DIR, pfs=pfs, excntry=cntry, adj=adjust)
+#monthly_df, global_df = add_comb_model(data_path=DATA_DIR, pfs=pfs, excntry=cntry, adj=adjust)
 
 #%%
 for cntry in ["USA"]:
-     for pfs in [3]:
+     for pfs in [10]:
          for n_buck in [10]:
-                 for adjust in [0,1]:
+                 for adjust in [0, 1]:
                     global_ret_df = build_strategy_returns(
                      data_path=DATA_DIR,
                      excntry = cntry,
@@ -126,7 +125,7 @@ for cntry in ["USA"]:
 
  #%%
 for cntry in ["USA"]:
-    for pfs in [3]:
+    for pfs in [10]:
         for n_buck in [10]:
             for adjust in [0, 1]:
                 eval_strategy_returns(

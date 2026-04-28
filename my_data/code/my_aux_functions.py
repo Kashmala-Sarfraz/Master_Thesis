@@ -8,14 +8,14 @@ import pandas as pd
 import polars as pl
 from tqdm import tqdm
 from sktime.split import ExpandingWindowSplitter
-from sklearn.linear_model import Lasso, Ridge, ElasticNet, LinearRegression
-from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
-from sklearn.neural_network import MLPRegressor
+from sklearn.linear_model import Lasso, Ridge, ElasticNet, LinearRegression, LogisticRegression
+from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor, RandomForestClassifier, HistGradientBoostingClassifier
+from sklearn.neural_network import MLPRegressor, MLPClassifier
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import RandomizedSearchCV, PredefinedSplit
 from sklearn.inspection import permutation_importance
-from xgboost import XGBRegressor
-from sklearn.metrics import r2_score
+from xgboost import XGBRegressor, XGBClassifier
+from sklearn.metrics import r2_score, accuracy_score, balanced_accuracy_score, accuracy_score, precision_score, recall_score, f1_score
 from sklearn.preprocessing import StandardScaler
 import statsmodels.api as sm
 import numpy as np
@@ -585,6 +585,13 @@ def factor_returns(
         market_partial.write_parquet(
             data_path / "factor_returns" / f"temp_market_{f.stem}.parquet"
         )
+
+        data = data.with_columns([
+            pl.col(c).clip(
+                lower_bound=pl.col(c).quantile(0.01).over("eom"),
+                upper_bound=pl.col(c).quantile(0.99).over("eom")
+            ).alias(c)
+            for c in chars])
         
         for _i, x in enumerate(tqdm(chars, desc="Processing chars", unit="char", ncols=80)):
             sub = (
@@ -600,16 +607,6 @@ def factor_returns(
             # min companies in month
             sub = sub.with_columns(bp_n=pl.sum("bp_stock").over("eom")).filter(
                 pl.col("bp_n") >= bp_min_n)
-            
-            # winsorize
-            sub = sub.with_columns(pl.col("var").clip(
-                lower_bound=pl.col("var").quantile(0.01).over("eom"),
-                upper_bound=pl.col("var").quantile(0.99).over("eom"))
-            )
-            sub = sub.with_columns([
-                pl.col(c).clip(
-                lower_bound=pl.col(c).quantile(0.01).over("eom"),
-                upper_bound=pl.col(c).quantile(0.99).over("eom")).alias(c)for c in chars])
 
             # create buckets
             sub = add_ecdf(sub)
@@ -705,6 +702,8 @@ def factor_returns(
         data_path / "factor_returns" / f"{excntry}_{pfs}_pf_returns.parquet")
     market.sink_parquet(
         data_path / "factor_returns" / f"{excntry}_market_returns.parquet")
+    
+    return  lms_returns
 
 
 def build_factor_characteristics(data_path, pfs, excntry, adj):
@@ -750,11 +749,13 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
                 - pl.col("ret_exc_lead1m_vw_cap").mean().over("eom")
                 ).alias("ret_exc_cross_lead1m_vw_cap")
             )
-
+            
             df = df.with_columns(
                 pl.when(pl.col("ret_exc_cross_lead1m_vw_cap") > 0)
                 .then(1)
-                .otherwise(-1)
+                .when(pl.col("ret_exc_cross_lead1m_vw_cap") <= 0)
+                .then(-1)
+                .otherwise(None)
                 .alias("target_class")
             )
 
@@ -886,7 +887,7 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
         print(df.describe())
 
         feature_clip_cols = [
-            c for c in df.columns if c.startswith(("ret_m_", "ret_y_", "vol_m_", "beta_", "spread_"))]
+            c for c in df.columns if c.startswith(("ret_m_", "ret_y_", "vol_m_", "beta_"))]
         
         df = df.with_columns([
             pl.col(c).clip(
@@ -895,13 +896,22 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
                 ).alias(c)
                 for c in feature_clip_cols
                 ])
-
+        
         to_clean_cols = [
-            c for c in df.columns if (c.startswith(("ret", "vol_m_", "beta_", "spread_")))]
-        
+            c for c in df.columns
+            if c.startswith(("ret_m_", "ret_y_", "vol_m_", "beta_", "spread_"))
+        ]
+
+        target_clean_col = "target_class" if adj == 2 else base_ret
+
         df = df.filter(
-            pl.all_horizontal([pl.col(c).is_not_null() & pl.col(c).is_finite() for c in to_clean_cols]))
-        
+            pl.col(target_clean_col).is_not_null() &
+            pl.all_horizontal([
+                pl.col(c).is_not_null() & pl.col(c).is_finite()
+                for c in to_clean_cols
+            ])
+        )
+                
         df = df.sort(["eom", "characteristics"])
 
         df = df.with_columns(pl.arange(0, pl.len()).alias("row_id"))
@@ -910,8 +920,10 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
 
         X = df.drop(cols_to_drop).sort("row_id")
 
-        if adj == 2:
-            y = df.select(["row_id", "target_class"]).sort("row_id")
+        if adj == 1:
+             y = df.select(["row_id", base_ret, "ret_exc_lead1m_vw_cap"]).sort("row_id")
+        elif adj == 2:
+            y = df.select(["row_id", base_ret, "target_class", "ret_exc_lead1m_vw_cap"]).sort("row_id")
         else:
             y = df.select(["row_id", base_ret]).sort("row_id")
 
@@ -919,17 +931,21 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
         y.write_parquet(out_y)
         meta.write_parquet(meta_out)
 
+        return X, y
+
+def get_suffix(adj):
+    if adj == 1:
+        return "_cross"
+    elif adj == 2:
+        return "_class"
+    else:
+        return ""
 
 def build_train_val_test_idx(data_path, pfs, adj, excntry, min_train_val, val, test_range, forward_steps):
 
     test = (test_range * 12)
-
-    if adj == 1:
-        suffix = "_cross"
-    elif adj == 2:
-        suffix = "_class"
-    else:
-        suffix = ""
+    
+    suffix = get_suffix(adj)
 
     meta = pl.read_parquet(
         data_path/"factor_characteristics"/f"{excntry}_{pfs}_meta{suffix}.parquet").to_pandas()
@@ -954,11 +970,11 @@ def build_train_val_test_idx(data_path, pfs, adj, excntry, min_train_val, val, t
         val_months_idx = train_val_months_idx[-(val*12):]
 
         train_months = unique_eom.iloc[train_months_idx]
-        print(f"train starts from: {train_months.min()} to {train_months.max()}/n")
+        print(f"train starts from: {train_months.min()} to {train_months.max()}\n")
         val_months = unique_eom.iloc[val_months_idx]
-        print(f"val starts from: {val_months.min()} to {val_months.max()}/n")
+        print(f"val starts from: {val_months.min()} to {val_months.max()}\n")
         test_months = unique_eom.iloc[test_months_idx]
-        print(f"test starts from: {test_months.min()} to {test_months.max()}/n")
+        print(f"test starts from: {test_months.min()} to {test_months.max()}\n")
 
         train_rows = meta.loc[meta["eom"].isin(train_months), "row_id"].values
         val_rows = meta.loc[meta["eom"].isin(val_months), "row_id"].values
@@ -973,22 +989,53 @@ def build_train_val_test_idx(data_path, pfs, adj, excntry, min_train_val, val, t
         
     return expand_wind_splits
 
+def get_pos_class_proba(model, X):
+    proba = model.predict_proba(X)
 
-def predict_with_ols(X_train, y_train, X_test, y_test, r2_split, y_pred_split, y_true_split):
+    if hasattr(model, "classes_"):
+        pos_idx = np.where(model.classes_ == 1)[0][0]
+        return proba[:, pos_idx]
 
-    lr = LinearRegression().fit(X_train, y_train)
-    y_pred = lr.predict(X_test)
+    return proba[:, 1]
+
+def predict_with_ols(X_train, y_train, X_test, y_test,  y_pred_split, y_true_split):
+
+    model = LinearRegression().fit(X_train, y_train)
+    y_pred = model.predict(X_test)
     r2 = r2_score(y_test, y_pred)
 
     print(f"ols - r2_pred: {r2} for this split")
 
-    r2_split.setdefault("OLS", []).append(r2)
     y_pred_split.setdefault("OLS", []).append(y_pred.ravel())
     y_true_split.setdefault("OLS", []).append(y_test.values.ravel())
 
-    return lr, None, r2
+    return model
 
-def tune_model_with_val(model, param_dist, X_train, y_train, X_val, y_val, n_iter=15):
+def predict_with_logit_cls(X_train_val, y_train_val, X_test, y_test,
+                            y_pred_split, y_true_split, y_prob_split):
+
+    model = LogisticRegression(
+        penalty=None,
+        max_iter=5000,
+        solver="lbfgs",
+        random_state=42
+    )
+
+    model.fit(X_train_val, y_train_val)
+    y_pred = model.predict(X_test)
+    y_prob = get_pos_class_proba(model, X_test)
+
+    acc = balanced_accuracy_score(y_test, y_pred)
+
+    print(f"logit_cls - balanced_accuracy: {acc} for this split")
+
+    y_pred_split.setdefault("LOGIT_CLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("LOGIT_CLS", []).append(y_test.values.ravel())
+    y_prob_split.setdefault("LOGIT_CLS", []).append(y_prob)
+
+    return model
+
+def tune_model_with_val(model, param_dist, X_train, y_train, X_val, y_val, n_iter):
     
     X_train_val = np.vstack([X_train, X_val])
     y_train_val = np.concatenate([y_train, y_val])
@@ -1014,9 +1061,37 @@ def tune_model_with_val(model, param_dist, X_train, y_train, X_val, y_val, n_ite
 
     return search.best_params_
 
+def tune_classifier_with_val(model, param_dist, X_train, y_train, X_val, y_val, n_iter):
+    
+    X_train_val = np.vstack([X_train, X_val])
+    y_train_val = np.concatenate([y_train, y_val])
 
-def predict_with_pls(X_train, y_train, X_val, y_val, X_train_val, y_train_val, X_test, y_test,
-                     r2_split, y_pred_split, y_true_split):
+    test_fold = np.concatenate([
+        np.full(len(X_train), -1),
+        np.zeros(len(X_val))
+    ])
+
+    ps = PredefinedSplit(test_fold)
+
+    search = RandomizedSearchCV(
+        model,
+        param_distributions=param_dist,
+        n_iter=n_iter,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+        cv=ps,
+        random_state=42,
+        refit=False
+    )
+
+    search.fit(X_train_val, y_train_val)
+
+    return search.best_params_
+
+def predict_with_pls(X_train, y_train,
+                     X_val, y_val, X_train_val,
+                     y_train_val, X_test, y_test,
+                     y_pred_split, y_true_split):
                      
     param_dist = {"n_components": list(range(1, 11))}
     
@@ -1033,17 +1108,19 @@ def predict_with_pls(X_train, y_train, X_val, y_val, X_train_val, y_train_val, X
     r2 = r2_score(y_test, y_pred)
     print(f"pls - r2_pred: {r2} for this split")
 
-    r2_split.setdefault("PLS", []).append(r2)
     y_pred_split.setdefault("PLS", []).append(y_pred.ravel())
     y_true_split.setdefault("PLS", []).append(y_test.values.ravel())
 
-    return best_model, best_params, r2
+    return best_model
 
-def predict_with_lasso(X_train,y_train, X_val, y_val, X_train_val, y_train_val,
-                       X_test, y_test, r2_split, y_pred_split, y_true_split):
+def predict_with_lasso(X_train,y_train,
+                       X_val, y_val,
+                       X_train_val, y_train_val,
+                       X_test, y_test,
+                       y_pred_split, y_true_split):
 
     
-    param_dist = {"alpha": np.logspace(-3, np.log10(0.002), 100)}
+    param_dist = {"alpha": np.logspace(-3, np.log10(0.003), 100)}
 
     best_params = tune_model_with_val(
             Lasso(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=20)
@@ -1061,18 +1138,69 @@ def predict_with_lasso(X_train,y_train, X_val, y_val, X_train_val, y_train_val,
     r2 = r2_score(y_test, y_pred)
     print(f"lasso - r2_pred: {r2} for this split")
 
-
-    r2_split.setdefault("LASSO", []).append(r2)
     y_pred_split.setdefault("LASSO", []).append(y_pred.ravel())
     y_true_split.setdefault("LASSO", []).append(y_test.values.ravel())
 
-    return best_model, best_params, r2
+    return best_model
+
+def predict_with_lasso_cls(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        y_pred_split, y_true_split, y_prob_split):
+
+    param_dist = {
+        "C": np.logspace(-3, 2, 50)
+    }
+
+    best_params = tune_classifier_with_val(
+        LogisticRegression(
+            penalty="l1",
+            solver="saga",
+            max_iter=5000,
+            random_state=42,
+            n_jobs=-1
+        ),
+        param_dist,
+        X_train, y_train,
+        X_val, y_val,
+        n_iter=20
+    )
+
+    print(f"LASSO_CLS best params: {best_params}")
+
+    best_model = LogisticRegression(
+        penalty="l1",
+        solver="saga",
+        max_iter=5000,
+        random_state=42,
+        n_jobs=-1,
+        **best_params
+    )
+
+    best_model.fit(X_train_val, y_train_val)
+    y_pred = best_model.predict(X_test)
+    y_prob = get_pos_class_proba(best_model, X_test)
+
+    n_total = len(best_model.coef_.ravel())
+    n_zero = (best_model.coef_.ravel() == 0).sum()
+    print(f"Zero coefficients: {n_zero}/{n_total}")
+
+    acc = balanced_accuracy_score(y_test, y_pred)
+
+    print(f"lasso-cls - balanced_accuracy: {acc} for this split")
+
+    y_pred_split.setdefault("LASSO_CLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("LASSO_CLS", []).append(y_test.values.ravel())
+    y_prob_split.setdefault("LASSO_CLS", []).append(y_prob)
+
+    return best_model
 
 def predict_with_enet(X_train, y_train, X_val, y_val, X_train_val, y_train_val, X_test, y_test,
-                      r2_split, y_pred_split, y_true_split):
+                      y_pred_split, y_true_split):
                       
-    param_dist = {
-        "alpha": np.logspace(-3, np.log10(0.003), 50)}
+    param_dist = {"alpha": np.logspace(-3, np.log10(0.004), 50)}
 
     best_params = tune_model_with_val(
             ElasticNet(max_iter=5000, l1_ratio=0.5), param_dist, X_train, y_train, X_val, y_val, n_iter=20)
@@ -1090,15 +1218,68 @@ def predict_with_enet(X_train, y_train, X_val, y_val, X_train_val, y_train_val, 
     r2 = r2_score(y_test, y_pred)
     print(f"enet - r2_pred: {r2} for this split")
 
-    r2_split.setdefault("ENET", []).append(r2)
     y_pred_split.setdefault("ENET", []).append(y_pred.ravel())
     y_true_split.setdefault("ENET", []).append(y_test.values.ravel())
 
-    return best_model, best_params, r2
+    return best_model
+
+def predict_with_enet_cls(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        y_pred_split, y_true_split, y_prob_split):
+
+    param_dist = {"C": np.logspace(-3, 2, 50)}
+
+    best_params = tune_classifier_with_val(
+        LogisticRegression(
+            penalty="elasticnet",
+            solver="saga",
+            max_iter=5000,
+            random_state=42,
+            l1_ratio= 0.5,
+            n_jobs=-1
+        ),
+        param_dist,
+        X_train, y_train,
+        X_val, y_val,
+        n_iter=20
+    )
+
+    print(f"ENET_CLS best params: {best_params}")
+
+    best_model = LogisticRegression(
+        penalty="elasticnet",
+        solver="saga",
+        max_iter=5000,
+        random_state=42,
+        n_jobs=-1,
+        l1_ratio= 0.5,
+        **best_params
+    )
+
+    best_model.fit(X_train_val, y_train_val)
+    y_pred = best_model.predict(X_test)
+    y_prob = get_pos_class_proba(best_model, X_test)
+
+    n_total = len(best_model.coef_.ravel())
+    n_zero = (best_model.coef_.ravel() == 0).sum()
+    print(f"Zero coefficients: {n_zero}/{n_total}")
+
+    acc = balanced_accuracy_score(y_test, y_pred)
+
+    print(f"enet-cls - balanced_accuracy: {acc} for this split")
+
+    y_pred_split.setdefault("ENET_CLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("ENET_CLS", []).append(y_test.values.ravel())
+    y_prob_split.setdefault("ENET_CLS", []).append(y_prob)
+
+    return best_model
 
 
 def predict_with_rf(X_train, y_train, X_val, y_val, X_train_val, y_train_val,
-                    X_test, y_test, r2_split, y_pred_split, y_true_split):
+                    X_test, y_test,  y_pred_split, y_true_split):
 
     param_dist = {
         "n_estimators": [100, 200],
@@ -1120,15 +1301,60 @@ def predict_with_rf(X_train, y_train, X_val, y_val, X_train_val, y_train_val,
     r2 = r2_score(y_test, y_pred)
     print(f"rf - r2_pred: {r2} for this split")
 
-    r2_split.setdefault("RF", []).append(r2)
     y_pred_split.setdefault("RF", []).append(y_pred.ravel())
     y_true_split.setdefault("RF", []).append(y_test.values.ravel())
 
-    return best_model, best_params, r2
+    return best_model
+
+
+def predict_with_rf_cls(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        y_pred_split, y_true_split, y_prob_split):
+
+    param_dist = {
+        "n_estimators": [100, 200],
+        "max_depth": [3, 5, 7],
+        "min_samples_leaf": [5, 10],
+        "max_features": ["sqrt", 0.3]
+    }
+
+    best_params = tune_classifier_with_val(
+        RandomForestClassifier(random_state=42, n_jobs=-1, class_weight="balanced"),
+        param_dist,
+        X_train, y_train,
+        X_val, y_val,
+        n_iter=10
+    )
+
+    print(f"RF_CLS best params: {best_params}")
+
+    best_model = RandomForestClassifier(
+        random_state=42,
+        n_jobs=-1,
+        class_weight="balanced",
+        **best_params
+    )
+
+    best_model.fit(X_train_val, y_train_val)
+    y_pred = best_model.predict(X_test)
+    y_prob = get_pos_class_proba(best_model, X_test)
+
+    acc = balanced_accuracy_score(y_test, y_pred)
+
+    print(f"rf-cls - balanced_accuracy: {acc} for this split")
+
+    y_pred_split.setdefault("RF_CLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("RF_CLS", []).append(y_test.values.ravel())
+    y_prob_split.setdefault("RF_CLS", []).append(y_prob)
+
+    return best_model
 
 def predict_with_gbrt(
         X_train, y_train, X_val, y_val, X_train_val, y_train_val, X_test, y_test,
-          r2_split, y_pred_split, y_true_split):
+        y_pred_split, y_true_split):
     
     param_dist = {
         "learning_rate": [0.03, 0.05],
@@ -1154,11 +1380,50 @@ def predict_with_gbrt(
     r2 = r2_score(y_test, y_pred)
     print(f"gbrt - r2_pred: {r2} for this split")
 
-    r2_split.setdefault("GBRT", []).append(r2)
     y_pred_split.setdefault("GBRT", []).append(y_pred.ravel())
     y_true_split.setdefault("GBRT", []).append(y_test.values.ravel())
 
-    return best_model, best_params, r2
+    return best_model
+
+
+def predict_with_gbrt_cls(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        y_pred_split, y_true_split, y_prob_split):
+
+    param_dist = {
+        "learning_rate": [0.03, 0.05],
+        "max_depth": [5, 7],
+        "min_samples_leaf": [10, 20],
+        "max_iter": [100, 200]
+    }
+
+    best_params = tune_classifier_with_val(
+        HistGradientBoostingClassifier(random_state=42),
+        param_dist,
+        X_train, y_train,
+        X_val, y_val,
+        n_iter=8
+    )
+
+    print(f"GBRT-cls best params: {best_params}")
+
+    best_model = HistGradientBoostingClassifier(random_state=42, **best_params)
+    best_model.fit(X_train_val, y_train_val)
+    y_pred = best_model.predict(X_test)
+    y_prob = get_pos_class_proba(best_model, X_test)
+
+    acc = balanced_accuracy_score(y_test, y_pred)
+
+    print(f"gbrt-cls - balanced_accuracy: {acc} for this split")
+
+    y_pred_split.setdefault("GBRT_CLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("GBRT_CLS", []).append(y_test.values.ravel())
+    y_prob_split.setdefault("GBRT_CLS", []).append(y_prob)
+
+    return best_model
 
 
 def predict_with_xgb(
@@ -1166,7 +1431,7 @@ def predict_with_xgb(
     X_val, y_val,
     X_train_val, y_train_val,
     X_test, y_test,
-    r2_split, y_pred_split, y_true_split):
+     y_pred_split, y_true_split):
     
     best_score = -np.inf
     best_params = None
@@ -1218,29 +1483,119 @@ def predict_with_xgb(
     print(f"XGB best score: {best_score}")
     print(f"XGB best iteration: {best_iteration}")
 
-    final_model = XGBRegressor(
+    best_model = XGBRegressor(
         **best_params,
-        n_estimators=best_iteration, 
+        n_estimators=best_iteration + 1 if best_iteration is not None else 100, 
         objective="reg:squarederror",
         random_state=42,
         n_jobs=-1
     )
 
-    final_model.fit(X_train_val, y_train_val, verbose=False)
+    best_model.fit(X_train_val, y_train_val, verbose=False)
 
-    y_pred = final_model.predict(X_test)
+    y_pred = best_model.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
     print(f"xgb - r2_pred: {r2} for this split")
 
-    r2_split.setdefault("XGB", []).append(r2)
     y_pred_split.setdefault("XGB", []).append(y_pred.ravel())
     y_true_split.setdefault("XGB", []).append(y_test.values.ravel())
+    
 
-    return final_model, best_params, r2
+    return best_model
 
-def predict_with_ffnn(X_train, y_train, X_val, y_val, X_train_val, y_train_val,
-                       X_test, y_test, r2_split, y_pred_split, y_true_split):
+
+def predict_with_xgb_cls(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        y_pred_split, y_true_split, y_prob_split):
+
+    y_train_xgb = np.where(np.asarray(y_train) == 1, 1, 0)
+    y_val_xgb = np.where(np.asarray(y_val) == 1, 1, 0)
+    y_train_val_xgb = np.where(np.asarray(y_train_val) == 1, 1, 0)
+    y_test_xgb = np.where(np.asarray(y_test) == 1, 1, 0)
+
+    best_score = -np.inf
+    best_params = None
+    best_iteration = None
+
+    for lr in [0.03, 0.1]:
+        for max_d in [5, 7]:
+            for subs in [0.6, 0.8]:
+                for colsample in [0.6, 0.8]:
+                    for reg_lambda in [1, 5]:
+                        for min_child_weight in [1, 5]:
+
+                            model = XGBClassifier(
+                                learning_rate=lr,
+                                n_estimators=1000,
+                                max_depth=max_d,
+                                subsample=subs,
+                                colsample_bytree=colsample,
+                                reg_lambda=reg_lambda,
+                                min_child_weight=min_child_weight,
+                                objective="binary:logistic",
+                                eval_metric="logloss",
+                                early_stopping_rounds=20,
+                                random_state=42,
+                                n_jobs=-1
+                            )
+
+                            model.fit(
+                                X_train,
+                                y_train_xgb,
+                                eval_set=[(X_val, y_val_xgb)],
+                                verbose=False
+                            )
+
+                            y_pred_val = model.predict(X_val)
+                            metric = balanced_accuracy_score(y_val_xgb, y_pred_val)
+
+                            if metric > best_score:
+                                best_score = metric
+                                best_params = {
+                                    "learning_rate": lr,
+                                    "max_depth": max_d,
+                                    "subsample": subs,
+                                    "colsample_bytree": colsample,
+                                    "reg_lambda": reg_lambda,
+                                    "min_child_weight": min_child_weight
+                                }
+                                best_iteration = model.best_iteration
+
+    print(f"XGB_CLS best params: {best_params}")
+    print(f"XGB_CLS best score: {best_score}")
+    print(f"XGB_CLS best iteration: {best_iteration}")
+
+    best_model = XGBClassifier(
+        **best_params,
+        n_estimators=best_iteration + 1 if best_iteration is not None else 100,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        random_state=42,
+        n_jobs=-1
+    )
+
+    best_model.fit(X_train_val, y_train_val_xgb, verbose=False)
+
+    y_pred_xgb = best_model.predict(X_test)
+
+    y_pred = np.where(y_pred_xgb == 1, 1, -1)
+    y_prob = get_pos_class_proba(best_model, X_test)
+
+    acc = balanced_accuracy_score(y_test, y_pred)
+
+    print(f"xgb-cls - balanced_accuracy: {acc} for this split")
+
+    y_pred_split.setdefault("XGB_CLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("XGB_CLS", []).append(y_test.values.ravel())
+    y_prob_split.setdefault("XGB_CLS", []).append(y_prob)
+
+    return best_model
+
+def predict_with_ffnn(X_train, y_train, X_val, y_val, X_train_val, y_train_val, X_test, y_test,  y_pred_split, y_true_split):
     
     param_dist = {
     "learning_rate_init": [0.0003, 0.001],
@@ -1257,7 +1612,7 @@ def predict_with_ffnn(X_train, y_train, X_val, y_val, X_train_val, y_train_val,
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=4,
+        n_iter=10,
         
     )
 
@@ -1269,27 +1624,216 @@ def predict_with_ffnn(X_train, y_train, X_val, y_val, X_train_val, y_train_val,
         solver="adam",
         max_iter=300,
         random_state=42,
+        early_stopping=True,
         **best_params)
+    
     best_model.fit(X_train_val, y_train_val)
     y_pred = best_model.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
     print(f"ffnn - r2_pred: {r2} for this split")
 
-    r2_split.setdefault("FFNN", []).append(r2)
     y_pred_split.setdefault("FFNN", []).append(y_pred.ravel())
     y_true_split.setdefault("FFNN", []).append(y_test.values.ravel())
+    
+    return best_model
 
-    return best_model, best_params, r2
+def predict_with_ffnn_cls(
+        X_train, y_train,
+        X_val, y_val,
+        X_train_val, y_train_val,
+        X_test, y_test,
+        y_pred_split, y_true_split, y_prob_split):
+
+    param_dist = {
+        "learning_rate_init": [0.0003, 0.001],
+        "alpha": [0.001, 0.002, 0.01, 0.05]
+    }
+
+    best_params = tune_classifier_with_val(
+        MLPClassifier(
+            hidden_layer_sizes=(8,),
+            activation="relu",
+            solver="adam",
+            max_iter=300,
+            early_stopping=True,
+            random_state=42
+        ),
+        param_dist,
+        X_train, y_train,
+        X_val, y_val,
+        n_iter=8
+    )
+
+    print(f"FFNN_CLS best params: {best_params}")
+
+    best_model = MLPClassifier(
+        hidden_layer_sizes=(8,),
+        activation="relu",
+        solver="adam",
+        max_iter=300,
+        early_stopping=True,
+        random_state=42,
+        **best_params
+    )
+
+    best_model.fit(X_train_val, y_train_val)
+    y_pred = best_model.predict(X_test)
+    y_prob = get_pos_class_proba(best_model, X_test)
+
+    acc = balanced_accuracy_score(y_test, y_pred)
+    print(f"ffnn-cls - balanced_accuracy: {acc} for this split")
+
+    y_pred_split.setdefault("FFNN_CLS", []).append(y_pred.ravel())
+    y_true_split.setdefault("FFNN_CLS", []).append(y_test.values.ravel())
+    y_prob_split.setdefault("FFNN_CLS", []).append(y_prob)
+
+    return best_model
+
+def save_train_pred_outputs(data_path, excntry, pfs, adj,
+                            y_pred_split, y_true_split, y_prob_split,
+                            test_idx_split, y_ret):
+
+    suffix = get_suffix(adj)
+
+    base = data_path / "ml_model_output"
+    pred_path = base / f"{excntry}_{pfs}_pred_month{suffix}.parquet"
+
+    pred_lst = []
+
+    row_ids_all = np.concatenate(test_idx_split)
+
+    for model in y_pred_split.keys():
+
+        y_pred_all = np.concatenate(y_pred_split[model])
+        y_true_all = np.concatenate(y_true_split[model])
+        
+        out = {
+            "row_id": row_ids_all,
+            "model": model,
+            "prediction": y_pred_all,
+            "actual": y_true_all,
+            "country": excntry,
+            "pfs": pfs
+        }
+
+        if y_prob_split is not None and model in y_prob_split:
+            out["probability"] = np.concatenate(y_prob_split[model])
+        else:
+            out["probability"] = np.full(len(y_pred_all), np.nan)
+
+        pred_lst.append(pl.DataFrame(out))
+
+    df_pred = pl.concat(pred_lst, how="diagonal")
+    df_pred = df_pred.join(y_ret, on="row_id", how="left")
+    
+    if pred_path.exists():
+        existing = pl.read_parquet(pred_path)
+        df_pred = pl.concat([existing, df_pred], how="diagonal")
+        df_pred = df_pred.unique(subset=["row_id", "model", "country", "pfs"], keep="last")
+
+    df_pred.write_parquet(pred_path)
+
+    return df_pred
+
+def save_vi_output(data_path, excntry, pfs, adj, vi_split, test_idx_split, feature_names):
+
+    suffix = get_suffix(adj)
+    base = data_path / "ml_model_output"
+
+    vi_path = base / f"{excntry}_{pfs}_vi_month{suffix}.parquet"
+    meta = (
+        pl.read_parquet(data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta{suffix}.parquet")
+        .select(["row_id", "eom"]))
+
+    vi_lst = []
+
+    for model, vi_list in vi_split.items():
+
+        for i, vi_arr in enumerate(vi_list):
+
+            row_ids = test_idx_split[i]
+
+            test_dates = (
+                meta
+                .filter(pl.col("row_id").is_in(row_ids))
+                .select("eom")
+            )
+
+            test_period = test_dates["eom"].min()
+
+            vi_lst.append(
+                pl.DataFrame({
+                    "test_start": test_period,
+                    "model": model,
+                    "feature": feature_names,
+                    "importance": vi_arr,
+                    "country": excntry,
+                    "pfs": pfs
+                })
+            )
+
+    df_vi = pl.concat(vi_lst, how="diagonal")
+
+    df_vi = (
+        df_vi
+        .with_columns(
+            pl.when(pl.col("importance") < 0)
+            .then(0)
+            .otherwise(pl.col("importance"))
+            .alias("importance")
+        )
+        .with_columns(
+            (
+                pl.col("importance")
+                / pl.col("importance").sum().over(["test_start", "model", "country", "pfs"])
+            )
+            .fill_nan(0)
+            .fill_null(0)
+            .alias("importance")
+        )
+    )
+
+    if vi_path.exists():
+        existing = pl.read_parquet(vi_path)
+        df_vi = pl.concat([existing, df_vi], how="diagonal")
+        df_vi = df_vi.unique(subset=["test_start", "model", "feature", "country", "pfs"], keep="last")
+
+    df_vi.write_parquet(vi_path)
+
+    return df_vi
+
 
 def train_pred_model(data_path, excntry, pfs, splits_idx, model, adj):
 
-    suffix = "_cross" if adj == 1 else ""
-    base_ret = "ret_exc_cross_lead1m_vw_cap" if adj == 1 else "ret_exc_lead1m_vw_cap"
+    if adj == 1:
+        suffix = "_cross"
+        target_col = "ret_exc_cross_lead1m_vw_cap"
+    elif adj == 2:
+        suffix = "_class"
+        target_col = "target_class"
+    else:
+        suffix = ""
+        target_col = "ret_exc_lead1m_vw_cap"
+
     base = data_path/"factor_characteristics"
 
     X_path = base /f"{excntry}_{pfs}_feature{suffix}.parquet"
     y_path = base /f"{excntry}_{pfs}_target{suffix}.parquet"
+
+    if adj == 2:
+        y_ret = (
+            pl.read_parquet(y_path)
+            .rename({
+                "ret_exc_lead1m_vw_cap": "ret_raw",
+                "ret_exc_cross_lead1m_vw_cap": "ret_cross"
+            })
+            .select(["row_id", "ret_raw", "ret_cross"]))
+    else:
+        y_ret = (
+            pl.read_parquet(y_path)
+            .rename({"ret_exc_lead1m_vw_cap": "ret_raw"})
+            .select(["row_id", "ret_raw"]))
 
     X_raw = pl.read_parquet(X_path).to_pandas()
     y_raw = pl.read_parquet(y_path).to_pandas()
@@ -1297,20 +1841,30 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model, adj):
     X = X_raw.set_index("row_id")
     y = y_raw.set_index("row_id")
 
-    y_series = y[base_ret]
+    feature_names = X.columns.to_list()
 
-    r2_split = {}
+    y_series = y[target_col]
+
     y_pred_split = {}
     y_true_split = {}
+    y_prob_split = {}
     vi_split = {}
     test_idx_split = []
 
-    if model == "all":
-        models_to_run = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB", "FFNN"]
-    elif isinstance(model, str):
-        models_to_run = [model.upper()]
+    if adj == 2:
+        if model == "all":
+            models_to_run = ["LOGIT_CLS", "LASSO_CLS", "ENET_CLS", "RF_CLS", "GBRT_CLS", "XGB_CLS", "FFNN_CLS"]
+        elif isinstance(model, str):
+            models_to_run = [model.upper()]
+        else:
+            models_to_run = [m.upper() for m in model]
     else:
-        models_to_run = [m.upper() for m in model]
+        if model == "all":
+            models_to_run = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB", "FFNN"]
+        elif isinstance(model, str):
+            models_to_run = [model.upper()]
+        else:
+            models_to_run = [m.upper() for m in model]
 
     for split in splits_idx:
 
@@ -1337,157 +1891,269 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model, adj):
 
         test_idx_split.append(test_index)
         
-        if "OLS" in models_to_run:
+        if adj == 2:
+
+            if "LOGIT_CLS" in models_to_run:
+                model_logit = predict_with_logit_cls(
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
+                )
+
+                result = permutation_importance(
+                    model_logit, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy"
+                )
+
+                vi_split.setdefault("LOGIT_CLS", []).append(result.importances_mean)
+
+
+            if "LASSO_CLS" in models_to_run:
+                model_lasso_logit = predict_with_lasso_cls(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
+                )
+
+                result = permutation_importance(
+                    model_lasso_logit, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy"
+                )
+
+                vi_split.setdefault("LASSO_CLS", []).append(result.importances_mean)
+
+
+            if "ENET_CLS" in models_to_run:
+                model_enet_logit = predict_with_enet_cls(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
+                )
+
+                result = permutation_importance(
+                    model_enet_logit, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy")
+
+                vi_split.setdefault("ENET_CLS", []).append(result.importances_mean)
+
+
+            if "RF_CLS" in models_to_run:
+                model_rf_cls = predict_with_rf_cls(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
+                )
+
+                result = permutation_importance(
+                    model_rf_cls, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy")
+
+                vi_split.setdefault("RF_CLS", []).append(result.importances_mean)
+
+
+            if "GBRT_CLS" in models_to_run:
+                model_gbrt_cls = predict_with_gbrt_cls(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
+                )
+
+                result = permutation_importance(
+                    model_gbrt_cls, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy")
+
+                vi_split.setdefault("GBRT_CLS", []).append(result.importances_mean)
+
+
+            if "XGB_CLS" in models_to_run:
+                model_xgb_cls = predict_with_xgb_cls(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
+                )
+
+                y_test_xgb = np.where(np.asarray(y_test) == 1, 1, 0)
+                result = permutation_importance(
+                    model_xgb_cls, X_test, y_test_xgb, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy")
+
+                vi_split.setdefault("XGB_CLS", []).append(result.importances_mean)
+
+
+            if "FFNN_CLS" in models_to_run:
+                model_ffnn_cls = predict_with_ffnn_cls(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
+                )
+
+                result = permutation_importance(
+                    model_ffnn_cls, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy")
+
+                vi_split.setdefault("FFNN_CLS", []).append(result.importances_mean)
+
+        else:
             
-            model_ols, best_params_ols, r2_ols = predict_with_ols(
-            X_train=X_train_val, y_train=y_train_val,
-            X_test=X_test, y_test=y_test,
-            r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split)
-
-            result = permutation_importance(
-                model_ols, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
-
-            vi_ols = result.importances_mean
-            vi_split.setdefault("OLS", []).append(vi_ols)
-
-
-        if "PLS" in models_to_run:
-
-            model_pls, best_params_pls, r2_pls = predict_with_pls(
-                X_train=X_train, y_train=y_train,
-                X_val=X_val, y_val=y_val,
-                X_train_val=X_train_val, y_train_val=y_train_val,
+            if "OLS" in models_to_run:
+                
+                model_ols = predict_with_ols(
+                X_train=X_train_val, y_train=y_train_val,
                 X_test=X_test, y_test=y_test,
-                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split
-            )
+                y_pred_split=y_pred_split, y_true_split=y_true_split)
 
-            result = permutation_importance(
-                model_pls, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
-
-            vi_pls = result.importances_mean
-            vi_split.setdefault("PLS", []).append(vi_pls)
+                result = permutation_importance(
+                    model_ols, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+                
+                vi_split.setdefault("OLS", []).append(result.importances_mean)
 
 
-        if "LASSO" in models_to_run:
+            if "PLS" in models_to_run:
 
-            model_lasso, best_params_lasso, r2_lasso = predict_with_lasso(
-                X_train=X_train, y_train=y_train,
-                X_val=X_val, y_val=y_val,
-                X_train_val=X_train_val, y_train_val=y_train_val,
-                X_test=X_test, y_test=y_test,
-                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split
-            )
+                model_pls = predict_with_pls(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                     y_pred_split=y_pred_split, y_true_split=y_true_split
+                )
 
-            result = permutation_importance(
-                model_lasso, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+                result = permutation_importance(
+                    model_pls, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
 
-            vi_lasso = result.importances_mean
-            vi_split.setdefault("LASSO", []).append(vi_lasso)
-
-
-        if "ENET" in models_to_run:
-
-            model_enet, best_params_enet, r2_enet = predict_with_enet(
-                X_train=X_train, y_train=y_train,
-                X_val=X_val, y_val=y_val,
-                X_train_val=X_train_val, y_train_val=y_train_val,
-                X_test=X_test, y_test=y_test,
-                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split
-            )
-
-            result = permutation_importance(
-                model_enet, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
-
-            vi_enet = result.importances_mean
-            vi_split.setdefault("ENET", []).append(vi_enet)
-
-        if "RF" in models_to_run:
-
-            model_rf, best_params_rf, r2_rf = predict_with_rf(
-                X_train=X_train, y_train=y_train,
-                X_val=X_val, y_val=y_val,
-                X_train_val=X_train_val, y_train_val=y_train_val,
-                X_test=X_test, y_test=y_test,
-                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split
-            )
-
-            result = permutation_importance(
-                model_rf, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
-
-            vi_rf = result.importances_mean
-            vi_split.setdefault("RF", []).append(vi_rf)
+                vi_split.setdefault("PLS", []).append(result.importances_mean)
 
 
-        if "GBRT" in models_to_run:
+            if "LASSO" in models_to_run:
 
-            model_gbrt, best_params_gbrt, r2_gbrt = predict_with_gbrt(
-                X_train=X_train, y_train=y_train,
-                X_val=X_val, y_val=y_val,
-                X_train_val=X_train_val, y_train_val=y_train_val,
-                X_test=X_test, y_test=y_test,
-                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split
-            )
+                model_lasso = predict_with_lasso(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                     y_pred_split=y_pred_split, y_true_split=y_true_split
+                )
 
-            result = permutation_importance(
-                model_gbrt, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+                result = permutation_importance(
+                    model_lasso, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
 
-            vi_gbrt = result.importances_mean
-            vi_split.setdefault("GBRT", []).append(vi_gbrt)
-
-
-        if "FFNN" in models_to_run:
-
-            model_ffnn, best_params_ffnn, r2_ffnn = predict_with_ffnn(
-                X_train=X_train, y_train=y_train,
-                X_val=X_val, y_val=y_val,
-                X_train_val=X_train_val, y_train_val=y_train_val,
-                X_test=X_test, y_test=y_test,
-                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split
-            )
-
-            result = permutation_importance(
-                model_ffnn, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
-
-            vi_ffnn = result.importances_mean
-            vi_split.setdefault("FFNN", []).append(vi_ffnn)
+                vi_split.setdefault("LASSO", []).append(result.importances_mean)
 
 
-        if "XGB" in models_to_run:
+            if "ENET" in models_to_run:
 
-            model_xgb, best_params_xgb, r2_xgb = predict_with_xgb(
-                X_train=X_train, y_train=y_train,
-                X_val=X_val, y_val=y_val,
-                X_train_val=X_train_val, y_train_val=y_train_val,
-                X_test=X_test, y_test=y_test,
-                r2_split=r2_split, y_pred_split=y_pred_split, y_true_split=y_true_split
-            )
+                model_enet = predict_with_enet(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                     y_pred_split=y_pred_split, y_true_split=y_true_split
+                )
 
-            result = permutation_importance(
-                model_xgb, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+                result = permutation_importance(
+                    model_enet, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+                
+                vi_split.setdefault("ENET", []).append(result.importances_mean)
 
-            vi_xgb = result.importances_mean
-            vi_split.setdefault("XGB", []).append(vi_xgb)
+            if "RF" in models_to_run:
 
-    return r2_split, y_pred_split, y_true_split, test_idx_split, vi_split
+                model_rf = predict_with_rf(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                     y_pred_split=y_pred_split, y_true_split=y_true_split
+                )
+
+                result = permutation_importance(
+                    model_rf, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+
+                vi_split.setdefault("RF", []).append(result.importances_mean)
+
+
+            if "GBRT" in models_to_run:
+
+                model_gbrt = predict_with_gbrt(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split
+                )
+
+                result = permutation_importance(
+                    model_gbrt, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+
+                vi_split.setdefault("GBRT", []).append(result.importances_mean)
+
+
+            if "FFNN" in models_to_run:
+
+                model_ffnn = predict_with_ffnn(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split
+                )
+
+                result = permutation_importance(
+                    model_ffnn, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+
+                vi_split.setdefault("FFNN", []).append(result.importances_mean)
+
+
+            if "XGB" in models_to_run:
+
+                model_xgb = predict_with_xgb(
+                    X_train=X_train, y_train=y_train,
+                    X_val=X_val, y_val=y_val,
+                    X_train_val=X_train_val, y_train_val=y_train_val,
+                    X_test=X_test, y_test=y_test,
+                    y_pred_split=y_pred_split, y_true_split=y_true_split
+                )
+
+                result = permutation_importance(
+                    model_xgb, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+
+                vi_split.setdefault("XGB", []).append(result.importances_mean)
+
+    df_pred = save_train_pred_outputs(data_path, excntry, pfs, adj,
+                                      y_pred_split=y_pred_split, y_true_split=y_true_split,
+                                      test_idx_split=test_idx_split, y_ret=y_ret,
+                                      y_prob_split=y_prob_split if adj == 2 else None)
+    
+    df_vi = save_vi_output(data_path, excntry, pfs, adj,
+                   vi_split=vi_split, test_idx_split=test_idx_split, feature_names=feature_names)
+    
+    return df_pred, df_vi
+
 
 def eval_correlation(df, excntry, pfs, adj, data_path):
-
-    if adj == 1:
-        suffix = "_cross"
-    elif adj == 2:
-        suffix = "_class"
-    else:
-        suffix = ""
+    
+    suffix = get_suffix(adj)
+        
     meta = pl.read_parquet(
         data_path/"factor_characteristics"/f"{excntry}_{pfs}_meta{suffix}.parquet").to_pandas()
     
     df = df.merge(meta[["row_id", "eom"]], on="row_id", how="left")
     pear_lst = []
     spear_lst = []
+
     for _, month in df.groupby("eom"):
 
-        y = month["actual"]
-        x = month["prediction"]
+        if adj == 2:
+            x = month["probability"]
+            y = month["ret_cross"]
+
+        else:
+            x = month["prediction"]
+            y = month["actual"]
         
         if x.std() == 0 or y.std() == 0:
             print(month)
@@ -1502,150 +2168,127 @@ def eval_correlation(df, excntry, pfs, adj, data_path):
     return {"pearson": pearson, "spearman": spearman}
 
 
-def eval_model(
-        data_path, pfs, r2_split, y_pred_split, y_true_split, test_idx_split, vi_split, excntry, adj):
+def eval_regression(y_true, y_pred):
+    return {
+        "r2": r2_score(y_true, y_pred),
+        "balanced_accuracy": None,}
 
-    suffix = "_cross" if adj == 1 else ""
+def eval_classification(y_true, y_pred):
+    return {
+        "r2": None,
+        "balanced_accuracy": balanced_accuracy_score(y_true, y_pred)}
+
+def eval_model(data_path, pfs, excntry, adj):
+
+    suffix = get_suffix(adj)
+
     base = data_path / "ml_model_output"
-    
-    meta = pl.read_parquet(
-        data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta{suffix}.parquet"
-        ).select(["row_id", "eom"])
-    
-    X_path = data_path/"factor_characteristics"/f"{excntry}_{pfs}_feature{suffix}.parquet"
-    vi_path = base / f"{excntry}_{pfs}_vi{suffix}.parquet"
-    vi_ts_path = base / f"{excntry}_{pfs}_vi_series{suffix}.parquet"
-    results_monthly_path = base /f"{excntry}_{pfs}_ml_models_monthly{suffix}.parquet"
-    results_global_path = base / f"{excntry}_{pfs}_ml_models_global{suffix}.parquet"
-    
-    y_path_raw = data_path/"factor_characteristics"/f"{excntry}_{pfs}_target.parquet"
-    y_raw = pl.read_parquet(y_path_raw)
-    y_raw = y_raw.rename({"ret_exc_lead1m_vw_cap": "ret_raw"})
-    y_raw = y_raw.select(["row_id", "ret_raw"])
 
-    feature_names = pl.read_parquet(X_path).to_pandas().drop(columns="row_id").columns
-    vi_global_lst = []
-    vi_ts_lst = []
+    pred_month_path = base / f"{excntry}_{pfs}_pred_month{suffix}.parquet"
+    vi_month_path = base / f"{excntry}_{pfs}_vi_month{suffix}.parquet"
 
-    for model, vi_list in vi_split.items():
+    results_global_path = base / f"{excntry}_{pfs}_eval_global{suffix}.parquet"
+    vi_global_path = base / f"{excntry}_{pfs}_vi_global{suffix}.parquet"
 
-        if model == "COMB":
-            continue
+    df_monthly = pl.read_parquet(pred_month_path)
 
-        vi_avg = np.mean(vi_list, axis=0)
-        vi_avg = np.maximum(vi_avg, 0)
-
-        if vi_avg.sum() != 0:
-            vi_norm = vi_avg / vi_avg.sum()
-        else:
-            vi_norm = vi_avg
-
-        for f, imp in zip(feature_names, vi_norm):
-            vi_global_lst.append({
-                "feature": f,
-                "importance": imp,
-                "model": model,
-                "country": excntry,
-                "pfs": pfs
-            })
-
-        for split_no, vi_arr in enumerate(vi_list):
-
-            row_ids = test_idx_split[split_no]
-
-            split_dates = (
-                meta
-                .filter(pl.col("row_id").is_in(row_ids))
-                .select(pl.col("eom"))
-            )
-
-            test_start = split_dates["eom"].min()
-            test_end = split_dates["eom"].max()
-
-            vi_arr = np.maximum(vi_arr, 0)
-
-            if vi_arr.sum() != 0:
-                vi_arr_norm = vi_arr / vi_arr.sum()
-            else:
-                vi_arr_norm = vi_arr
-
-            for f, imp in zip(feature_names, vi_arr_norm):
-                vi_ts_lst.append({
-                    "feature": f,
-                    "importance": imp,
-                    "model": model,
-                    "test_start": test_start,
-                    "test_end": test_end,
-                    "country": excntry,
-                    "pfs": pfs
-                })
-
+    if adj == 2:
+        df_monthly = df_monthly.with_columns([
+            pl.col("prediction").cast(pl.Int64),
+            pl.col("actual").cast(pl.Int64),
+            pl.col("probability").cast(pl.Float64),
+            pl.col("ret_raw").cast(pl.Float64),
+            pl.col("ret_cross").cast(pl.Float64),
+        ])
+    else:
+        df_monthly = df_monthly.with_columns([
+            pl.col("prediction").cast(pl.Float64),
+            pl.col("actual").cast(pl.Float64),
+            pl.col("ret_raw").cast(pl.Float64),
+        ])
 
     results_global_lst = []
-    results_monthly_lst = []
-    test_idx_all = np.concatenate(test_idx_split)
 
-    for model in y_pred_split.keys():
+    for model in df_monthly["model"].unique().to_list():
 
-        y_pred_all = np.concatenate(y_pred_split[model])
-        y_true_all = np.concatenate(y_true_split[model])
-        
-        results_monthly = pl.DataFrame({
-            "row_id": test_idx_all,
-            "prediction": y_pred_all,
-            "actual": y_true_all,
-            "model": model,
-            "country": excntry,
-            "pfs": pfs}
+        model_df = df_monthly.filter(pl.col("model") == model)
+
+        y_true_all = model_df["actual"].to_numpy()
+        y_pred_all = model_df["prediction"].to_numpy()
+
+        out_corr = eval_correlation(
+            df=model_df.to_pandas(),
+            excntry=excntry,
+            pfs=pfs,
+            adj=adj,
+            data_path=data_path
         )
 
-        results_monthly = results_monthly.join(y_raw, on="row_id", how="left").to_pandas()
-        
-        results_monthly_lst.append(results_monthly)
-
-        r2_global = r2_score(y_true_all, y_pred_all)
-        out_corr = eval_correlation(df=results_monthly, pfs=pfs, adj=adj, excntry=excntry, data_path=data_path)
+        if adj == 2:
+            out_score = eval_classification(
+                y_true_all.astype(int),
+                y_pred_all.astype(int)
+            )
+        else:
+            out_score = eval_regression(y_true_all, y_pred_all)
 
         results_global_lst.append({
-        "country": excntry,
-        "pfs": pfs,
-        "model": model,
-        "r2": r2_global,
-        "spearman": out_corr["spearman"],
-        "pearson": out_corr["pearson"]})
+            "country": excntry,
+            "pfs": pfs,
+            "model": model,
+            "r2": out_score["r2"],
+            "balanced_accuracy": out_score["balanced_accuracy"],
+            "spearman": out_corr["spearman"],
+            "pearson": out_corr["pearson"]
+        })
 
+    df_global = (
+        pl.from_pandas(pd.DataFrame(results_global_lst))
+        .with_columns([
+            pl.col("r2").cast(pl.Float64),
+            pl.col("balanced_accuracy").cast(pl.Float64),
+            pl.col("spearman").cast(pl.Float64),
+            pl.col("pearson").cast(pl.Float64),
+        ])
+    )
 
-    df_vi = pl.DataFrame(vi_global_lst)
-    if vi_path.exists():
-        existing = pl.read_parquet(vi_path)
-        df_vi = pl.concat([existing, df_vi])
-        df_vi = df_vi.unique(subset=["model", "country", "pfs"], keep="last")
-    df_vi.write_parquet(vi_path)
-    print(df_vi.sort(by="importance", descending=True).head(10))
-
-    df_vi_ts = pl.DataFrame(vi_ts_lst)
-    if vi_ts_path.exists():
-        existing = pl.read_parquet(vi_ts_path)
-        df_vi_ts = pl.concat([existing, df_vi_ts])
-        df_vi_ts = df_vi_ts.unique(subset=["model", "country", "pfs"], keep="last")
-    df_vi_ts.write_parquet(vi_ts_path)
-
-    df_global = pl.from_pandas(pd.DataFrame(results_global_lst))
     if results_global_path.exists():
         existing = pl.read_parquet(results_global_path)
-        df_global = pl.concat([existing, df_global])
+        df_global = pl.concat([existing, df_global], how="diagonal")
         df_global = df_global.unique(subset=["model", "country", "pfs"], keep="last")
+
     df_global.write_parquet(results_global_path)
     print(df_global)
 
-    df_monthly = pl.from_pandas(pd.concat(results_monthly_lst, ignore_index=True))
-    if results_monthly_path.exists():
-        existing = pl.read_parquet(results_monthly_path)
-        df_monthly = pl.concat([existing, df_monthly])
-        df_monthly = (df_monthly.sort("row_id").unique(subset=["row_id", "model", "country", "pfs"], keep="last"))
-    df_monthly.write_parquet(results_monthly_path)
+    if vi_month_path.exists():
 
-def add_comb_model(excntry, pfs, data_path, adj):
+        df_vi_month = pl.read_parquet(vi_month_path)
+
+        df_vi_global = (
+            df_vi_month
+            .group_by(["feature", "model", "country", "pfs"])
+            .agg(pl.col("importance").mean().alias("importance"))
+            .with_columns(
+                (
+                    pl.col("importance")
+                    / pl.col("importance").sum().over(["model", "country", "pfs"])
+                )
+                .fill_nan(0)
+                .fill_null(0)
+                .alias("importance")
+            )
+        )
+
+        if vi_global_path.exists():
+            existing = pl.read_parquet(vi_global_path)
+            df_vi_global = pl.concat([existing, df_vi_global], how="diagonal")
+            df_vi_global = df_vi_global.unique(subset=["feature", "model", "country", "pfs"], keep="last")
+
+        df_vi_global.write_parquet(vi_global_path)
+
+        return df_global, df_vi_global
+
+def add_comb_model(excntry, pfs, data_path, adj): ## EDIT HERE AFTER THE BREAK
     
     suffix = "_cross" if adj == 1 else ""
     results_monthly_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_ml_models_monthly{suffix}.parquet"
@@ -1653,9 +2296,9 @@ def add_comb_model(excntry, pfs, data_path, adj):
     monthly_df = pl.read_parquet(results_monthly_path).filter(pl.col("model") != "COMB")
 
     comb_df = (monthly_df
-            .filter((pl.col("model") != "FFNN") & (pl.col("model") != "OLS") & (pl.col("model") != "PLS"))
-            .group_by(["row_id", "country", "pfs"])
-            .agg([
+               .filter((pl.col("model") != "FFNN") & (pl.col("model") != "OLS") & (pl.col("model") != "PLS"))
+               .group_by(["row_id", "country", "pfs"])
+               .agg([
                 pl.col("prediction").mean().alias("prediction"),
                 pl.col("actual").first().alias("actual"),
                 pl.col("ret_raw").first().alias("ret_raw")
@@ -1686,12 +2329,11 @@ def add_comb_model(excntry, pfs, data_path, adj):
 
 
 def build_strategy_returns(data_path, excntry, pfs, n_buckets, adj):
-
-    meta_path = data_path/"factor_characteristics"/f"{excntry}_meta.parquet"
     
     suffix = "_cross" if adj == 1 else ""
     base = data_path / "portfolio_returns"
-    
+        
+    meta_path = data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta{suffix}.parquet"
     model_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_ml_models_monthly{suffix}.parquet"
     
     out_path_mon = base/f"{excntry}_{pfs}_{n_buckets}_port_ret_monthly_avg{suffix}.parquet"
