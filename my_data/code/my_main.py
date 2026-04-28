@@ -18,7 +18,8 @@ from my_aux_functions import(
     add_comb_model,
     eval_model,
     build_strategy_returns,
-    eval_strategy_returns)
+    eval_strategy_returns,
+    eval_strategy_returns_period)
 
 BASE_DIR = Path.home()/"Desktop"/"Master_Thesis"/"my_data"
 CODE_DIR = BASE_DIR / "code"
@@ -53,21 +54,24 @@ for ex in ["USA"]:
 feature = {}
 target = {}
 
-for ex in ["USA"]:
-    for pfs in [10]: #3, 4, 10
+for cntry in ["USA"]:
+    for pfs in [10, 3]: #3, 4, 10
         for adjust in [0, 1, 2]:
-            feature[(ex, pfs, adjust)], target [(ex, pfs, adjust)] = build_factor_characteristics(
-                data_path=DATA_DIR, excntry=ex, pfs=pfs, adj=adjust)
+
+            print(cntry, pfs, adjust)
+
+            feature[(cntry, pfs, adjust)], target [(cntry, pfs, adjust)] = build_factor_characteristics(
+                data_path=DATA_DIR, excntry=cntry, pfs=pfs, adj=adjust)
 
 #%% 
 # Define train, val and test periods
 splits_idx = {}
 
 for cntry in ["USA"]:  # , "JPN"
-    for pfs in [10]:  #3 , 4, 10
+    for pfs in [10, 3]:  #3 , 4, 10
         for adjust in [0, 1, 2]:
 
-            print(f"ADJUSTMENT: {adjust}")
+            print(cntry, pfs, adjust)
 
             splits = build_train_val_test_idx(
                 data_path=DATA_DIR,
@@ -84,18 +88,15 @@ for cntry in ["USA"]:  # , "JPN"
                 continue
 
             splits_idx[(cntry, pfs, adjust)] = splits
-#%% Train models and evaluate performance
-
+#%% Train models
 ml_pred = {}
 ml_imp = {}
-ml_pred_gl = {}
-ml_imp_gl = {}
 
 for cntry in ["USA"]: #, "JPN"
-        for pfs in [10]: #, 4, 10
+        for pfs in [10]: #, 4, 3
             for adjust in [0, 1, 2]:
             
-                print(cntry)
+                print(cntry, pfs, adjust)
                 
                 if (cntry, pfs, adjust) not in splits_idx:
                     continue
@@ -103,38 +104,73 @@ for cntry in ["USA"]: #, "JPN"
                 ml_pred[(cntry, pfs, adjust)], ml_imp[(cntry, pfs, adjust)] = train_pred_model(
                     data_path=DATA_DIR, excntry=cntry, pfs=pfs, adj=adjust,
                     splits_idx=splits_idx[cntry, pfs, adjust],
-                    model= ["ols", "logit_cls"])
-                
+                    model= ["lasso", "lasso_cls"])
+
+#%% Global Evaluation
+ml_pred_gl = {}
+ml_imp_gl = {}
+
+for cntry in ["USA"]: #, "JPN"
+        for pfs in [10]: #, 4, 3
+            for adjust in [0, 1, 2]:
+                print(cntry, pfs, adjust)
+            
                 ml_pred_gl[(cntry, pfs, adjust)], ml_imp_gl[(cntry, pfs, adjust)] = eval_model(
                      data_path=DATA_DIR, pfs=pfs, excntry=cntry, adj=adjust)
+#%% Add COMB
+ml_pred_w_comb = {}
+ml_pred_gl_w_comb = {}
+
+for cntry in ["USA"]: #, "JPN"
+        for pfs in [10]: #, 4, 3
+            for adjust in [0, 1, 2]:
+            
+                print(cntry, pfs, adjust)
                 
-#monthly_df, global_df = add_comb_model(data_path=DATA_DIR, pfs=pfs, excntry=cntry, adj=adjust)
+                ml_pred_w_comb[(cntry, pfs, adjust)], ml_pred_gl_w_comb[(cntry, pfs, adjust)] = add_comb_model(
+                    data_path=DATA_DIR, pfs=pfs, excntry=cntry, adj=adjust)
 
 #%%
+# Build Factor Selection Strategy and Scenario Analysis
+buck_ret_avg_gl = {}
+buck_ret_avg_mo = {}
+buck_ret_ts = {}
+buck_ret_per_mo = {}
+buck_ret_per_gl = {}
+
 for cntry in ["USA"]:
      for pfs in [10]:
          for n_buck in [10]:
-                 for adjust in [0, 1]:
-                    global_ret_df = build_strategy_returns(
-                     data_path=DATA_DIR,
-                     excntry = cntry,
-                     pfs = pfs,
-                     n_buckets=n_buck,
-                     adj=adjust
-                     )
+                 for adjust in [0, 1, 2]:
+
+                    buck_ret_avg_gl[(cntry, pfs, n_buck, adjust)], buck_ret_avg_mo[(cntry, pfs, n_buck, adjust)],
+                    buck_ret_ts[(cntry, pfs, n_buck, adjust)],
+                    buck_ret_per_mo[(cntry, pfs, n_buck, adjust)],
+                    buck_ret_per_gl[(cntry, pfs, n_buck, adjust)] = build_strategy_returns(
+                         data_path=DATA_DIR, excntry=cntry, pfs=pfs,n_buckets=n_buck,adj=adjust)
 
  #%%
+# Report Alphas and T stats for the whole Period
+regress_strat_gl = {}
+strat_turno = {}
+regress_buck_gl = {}
+
 for cntry in ["USA"]:
     for pfs in [10]:
         for n_buck in [10]:
-            for adjust in [0, 1]:
-                eval_strategy_returns(
-                    data_path=DATA_DIR,
-                    excntry = cntry,
-                    pfs = pfs,
-                    n_buckets=n_buck,
-                    adj=adjust)
-
-
+            for adjust in [0, 1, 2]:
+                regress_strat_gl[(cntry, pfs, n_buck, adjust)],
+                strat_turno[(cntry, pfs, n_buck, adjust)],
+                regress_buck_gl[(cntry, pfs, n_buck, adjust)] = eval_strategy_returns(
+                     data_path=DATA_DIR, excntry = cntry, pfs = pfs, n_buckets=n_buck, adj=adjust)
 
 #%%
+# Report Alphas and T stats for Crashes
+regress_strat_gl_crash = {}
+
+for cntry in ["USA"]:
+    for pfs in [10]:
+        for n_buck in [10]:
+            for adjust in [0, 1, 2]:
+                regress_strat_gl[(cntry, pfs, n_buck, adjust)] = eval_strategy_returns_period(
+                     data_path=DATA_DIR, excntry = cntry, pfs = pfs, n_buckets=n_buck, adj=adjust)

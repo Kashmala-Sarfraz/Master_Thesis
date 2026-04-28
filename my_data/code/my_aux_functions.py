@@ -881,10 +881,8 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
         ).drop("n")
 
         spreads = lms_returns.select(["eom", "characteristics"] + [f"spread_{c}" for c in chars])
-        print(spreads.head())
 
         df = df.join(spreads, on=["eom", "characteristics"], how="left")
-        print(df.describe())
 
         feature_clip_cols = [
             c for c in df.columns if c.startswith(("ret_m_", "ret_y_", "vol_m_", "beta_"))]
@@ -970,11 +968,8 @@ def build_train_val_test_idx(data_path, pfs, adj, excntry, min_train_val, val, t
         val_months_idx = train_val_months_idx[-(val*12):]
 
         train_months = unique_eom.iloc[train_months_idx]
-        print(f"train starts from: {train_months.min()} to {train_months.max()}\n")
         val_months = unique_eom.iloc[val_months_idx]
-        print(f"val starts from: {val_months.min()} to {val_months.max()}\n")
         test_months = unique_eom.iloc[test_months_idx]
-        print(f"test starts from: {test_months.min()} to {test_months.max()}\n")
 
         train_rows = meta.loc[meta["eom"].isin(train_months), "row_id"].values
         val_rows = meta.loc[meta["eom"].isin(val_months), "row_id"].values
@@ -1004,7 +999,7 @@ def predict_with_ols(X_train, y_train, X_test, y_test,  y_pred_split, y_true_spl
     y_pred = model.predict(X_test)
     r2 = r2_score(y_test, y_pred)
 
-    print(f"ols - r2_pred: {r2} for this split")
+    print(f"ols - r2_pred: {r2}")
 
     y_pred_split.setdefault("OLS", []).append(y_pred.ravel())
     y_true_split.setdefault("OLS", []).append(y_test.values.ravel())
@@ -1027,7 +1022,7 @@ def predict_with_logit_cls(X_train_val, y_train_val, X_test, y_test,
 
     acc = balanced_accuracy_score(y_test, y_pred)
 
-    print(f"logit_cls - balanced_accuracy: {acc} for this split")
+    print(f"logit_cls - balanced_accuracy: {acc}")
 
     y_pred_split.setdefault("LOGIT_CLS", []).append(y_pred.ravel())
     y_true_split.setdefault("LOGIT_CLS", []).append(y_test.values.ravel())
@@ -1106,7 +1101,7 @@ def predict_with_pls(X_train, y_train,
     y_pred = best_model.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
-    print(f"pls - r2_pred: {r2} for this split")
+    print(f"pls - r2_pred: {r2}")
 
     y_pred_split.setdefault("PLS", []).append(y_pred.ravel())
     y_true_split.setdefault("PLS", []).append(y_test.values.ravel())
@@ -1120,7 +1115,7 @@ def predict_with_lasso(X_train,y_train,
                        y_pred_split, y_true_split):
 
     
-    param_dist = {"alpha": np.logspace(-3, np.log10(0.003), 100)}
+    param_dist = {"alpha": np.logspace(-3, np.log10(0.002), 100)}
 
     best_params = tune_model_with_val(
             Lasso(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=20)
@@ -1136,7 +1131,7 @@ def predict_with_lasso(X_train,y_train,
     print(f"Zero coefficients: {n_zero}/{n_total}")
 
     r2 = r2_score(y_test, y_pred)
-    print(f"lasso - r2_pred: {r2} for this split")
+    print(f"lasso - r2_pred: {r2}")
 
     y_pred_split.setdefault("LASSO", []).append(y_pred.ravel())
     y_true_split.setdefault("LASSO", []).append(y_test.values.ravel())
@@ -1189,7 +1184,7 @@ def predict_with_lasso_cls(
 
     acc = balanced_accuracy_score(y_test, y_pred)
 
-    print(f"lasso-cls - balanced_accuracy: {acc} for this split")
+    print(f"lasso-cls - balanced_accuracy: {acc}")
 
     y_pred_split.setdefault("LASSO_CLS", []).append(y_pred.ravel())
     y_true_split.setdefault("LASSO_CLS", []).append(y_test.values.ravel())
@@ -1216,7 +1211,7 @@ def predict_with_enet(X_train, y_train, X_val, y_val, X_train_val, y_train_val, 
     print(f"Zero coefficients: {n_zero}/{n_total}")
 
     r2 = r2_score(y_test, y_pred)
-    print(f"enet - r2_pred: {r2} for this split")
+    print(f"enet - r2_pred: {r2}")
 
     y_pred_split.setdefault("ENET", []).append(y_pred.ravel())
     y_true_split.setdefault("ENET", []).append(y_test.values.ravel())
@@ -1269,7 +1264,7 @@ def predict_with_enet_cls(
 
     acc = balanced_accuracy_score(y_test, y_pred)
 
-    print(f"enet-cls - balanced_accuracy: {acc} for this split")
+    print(f"enet-cls - balanced_accuracy: {acc}")
 
     y_pred_split.setdefault("ENET_CLS", []).append(y_pred.ravel())
     y_true_split.setdefault("ENET_CLS", []).append(y_test.values.ravel())
@@ -1299,7 +1294,7 @@ def predict_with_rf(X_train, y_train, X_val, y_val, X_train_val, y_train_val,
     y_pred = best_model.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
-    print(f"rf - r2_pred: {r2} for this split")
+    print(f"rf - r2_pred: {r2}")
 
     y_pred_split.setdefault("RF", []).append(y_pred.ravel())
     y_true_split.setdefault("RF", []).append(y_test.values.ravel())
@@ -1344,7 +1339,7 @@ def predict_with_rf_cls(
 
     acc = balanced_accuracy_score(y_test, y_pred)
 
-    print(f"rf-cls - balanced_accuracy: {acc} for this split")
+    print(f"rf-cls - balanced_accuracy: {acc}")
 
     y_pred_split.setdefault("RF_CLS", []).append(y_pred.ravel())
     y_true_split.setdefault("RF_CLS", []).append(y_test.values.ravel())
@@ -1378,7 +1373,7 @@ def predict_with_gbrt(
     y_pred = best_model.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
-    print(f"gbrt - r2_pred: {r2} for this split")
+    print(f"gbrt - r2_pred: {r2}")
 
     y_pred_split.setdefault("GBRT", []).append(y_pred.ravel())
     y_true_split.setdefault("GBRT", []).append(y_test.values.ravel())
@@ -1417,7 +1412,7 @@ def predict_with_gbrt_cls(
 
     acc = balanced_accuracy_score(y_test, y_pred)
 
-    print(f"gbrt-cls - balanced_accuracy: {acc} for this split")
+    print(f"gbrt-cls - balanced_accuracy: {acc}")
 
     y_pred_split.setdefault("GBRT_CLS", []).append(y_pred.ravel())
     y_true_split.setdefault("GBRT_CLS", []).append(y_test.values.ravel())
@@ -1496,7 +1491,7 @@ def predict_with_xgb(
     y_pred = best_model.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
-    print(f"xgb - r2_pred: {r2} for this split")
+    print(f"xgb - r2_pred: {r2}")
 
     y_pred_split.setdefault("XGB", []).append(y_pred.ravel())
     y_true_split.setdefault("XGB", []).append(y_test.values.ravel())
@@ -1587,7 +1582,7 @@ def predict_with_xgb_cls(
 
     acc = balanced_accuracy_score(y_test, y_pred)
 
-    print(f"xgb-cls - balanced_accuracy: {acc} for this split")
+    print(f"xgb-cls - balanced_accuracy: {acc}")
 
     y_pred_split.setdefault("XGB_CLS", []).append(y_pred.ravel())
     y_true_split.setdefault("XGB_CLS", []).append(y_test.values.ravel())
@@ -1631,7 +1626,7 @@ def predict_with_ffnn(X_train, y_train, X_val, y_val, X_train_val, y_train_val, 
     y_pred = best_model.predict(X_test)
 
     r2 = r2_score(y_test, y_pred)
-    print(f"ffnn - r2_pred: {r2} for this split")
+    print(f"ffnn - r2_pred: {r2}")
 
     y_pred_split.setdefault("FFNN", []).append(y_pred.ravel())
     y_true_split.setdefault("FFNN", []).append(y_test.values.ravel())
@@ -1682,7 +1677,7 @@ def predict_with_ffnn_cls(
     y_prob = get_pos_class_proba(best_model, X_test)
 
     acc = balanced_accuracy_score(y_test, y_pred)
-    print(f"ffnn-cls - balanced_accuracy: {acc} for this split")
+    print(f"ffnn-cls - balanced_accuracy: {acc}")
 
     y_pred_split.setdefault("FFNN_CLS", []).append(y_pred.ravel())
     y_true_split.setdefault("FFNN_CLS", []).append(y_test.values.ravel())
@@ -2187,9 +2182,6 @@ def eval_model(data_path, pfs, excntry, adj):
     pred_month_path = base / f"{excntry}_{pfs}_pred_month{suffix}.parquet"
     vi_month_path = base / f"{excntry}_{pfs}_vi_month{suffix}.parquet"
 
-    results_global_path = base / f"{excntry}_{pfs}_eval_global{suffix}.parquet"
-    vi_global_path = base / f"{excntry}_{pfs}_vi_global{suffix}.parquet"
-
     df_monthly = pl.read_parquet(pred_month_path)
 
     if adj == 2:
@@ -2216,22 +2208,12 @@ def eval_model(data_path, pfs, excntry, adj):
         y_true_all = model_df["actual"].to_numpy()
         y_pred_all = model_df["prediction"].to_numpy()
 
-        out_corr = eval_correlation(
-            df=model_df.to_pandas(),
-            excntry=excntry,
-            pfs=pfs,
-            adj=adj,
-            data_path=data_path
-        )
-
-        if adj == 2:
-            out_score = eval_classification(
-                y_true_all.astype(int),
-                y_pred_all.astype(int)
-            )
-        else:
-            out_score = eval_regression(y_true_all, y_pred_all)
-
+        out_corr = eval_correlation(df=model_df.to_pandas(), excntry=excntry, pfs=pfs, adj=adj, data_path=data_path)
+        
+        out_score = (
+            eval_classification(y_true_all.astype(int), y_pred_all.astype(int)) if adj == 2
+            else eval_regression(y_true_all, y_pred_all))
+   
         results_global_lst.append({
             "country": excntry,
             "pfs": pfs,
@@ -2251,6 +2233,8 @@ def eval_model(data_path, pfs, excntry, adj):
             pl.col("pearson").cast(pl.Float64),
         ])
     )
+    
+    results_global_path = base / f"{excntry}_{pfs}_eval_global{suffix}.parquet"
 
     if results_global_path.exists():
         existing = pl.read_parquet(results_global_path)
@@ -2279,6 +2263,8 @@ def eval_model(data_path, pfs, excntry, adj):
             )
         )
 
+        vi_global_path = base / f"{excntry}_{pfs}_vi_global{suffix}.parquet"
+
         if vi_global_path.exists():
             existing = pl.read_parquet(vi_global_path)
             df_vi_global = pl.concat([existing, df_vi_global], how="diagonal")
@@ -2288,57 +2274,162 @@ def eval_model(data_path, pfs, excntry, adj):
 
         return df_global, df_vi_global
 
-def add_comb_model(excntry, pfs, data_path, adj): ## EDIT HERE AFTER THE BREAK
+def add_comb_model(excntry, pfs, data_path, adj):
     
-    suffix = "_cross" if adj == 1 else ""
-    results_monthly_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_ml_models_monthly{suffix}.parquet"
+    suffix = get_suffix(adj)
+
+    results_monthly_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_pred_month{suffix}.parquet"
 
     monthly_df = pl.read_parquet(results_monthly_path).filter(pl.col("model") != "COMB")
 
-    comb_df = (monthly_df
-               .filter((pl.col("model") != "FFNN") & (pl.col("model") != "OLS") & (pl.col("model") != "PLS"))
-               .group_by(["row_id", "country", "pfs"])
-               .agg([
-                pl.col("prediction").mean().alias("prediction"),
+    if adj == 2:
+
+        comb_df = (
+            monthly_df
+            .group_by(["row_id", "country", "pfs"])
+            .agg([
+                pl.col("probability").mean().alias("probability"),
                 pl.col("actual").first().alias("actual"),
-                pl.col("ret_raw").first().alias("ret_raw")
-                ]).with_columns(pl.lit("COMB").alias("model")))
+                pl.col("ret_raw").first().alias("ret_raw"),
+                pl.col("ret_cross").first().alias("ret_cross"),
+            ])
+            .with_columns([
+                pl.when(pl.col("probability") > 0.5)
+                .then(1)
+                .otherwise(-1)
+                .alias("prediction"),
+                pl.lit("COMB").alias("model")
+            ])
+        )
+
+    else:
+        comb_df = (monthly_df
+                .group_by(["row_id", "country", "pfs"])
+                .agg([
+                    pl.col("prediction").mean().alias("prediction"),
+                    pl.col("actual").first().alias("actual"),
+                    pl.col("ret_raw").first().alias("ret_raw")
+                    ])
+                .with_columns([
+                    pl.lit(np.nan).cast(pl.Float64).alias("probability"),
+                    pl.lit("COMB").alias("model")]))
 
     comb_df = comb_df.select(monthly_df.columns)
     monthly_df = pl.concat([monthly_df, comb_df])
     monthly_df.write_parquet(results_monthly_path)
 
-    results_global_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_ml_models_global{suffix}.parquet"
+    results_global_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_eval_global{suffix}.parquet"
     global_df = pl.read_parquet(results_global_path).filter(pl.col("model") != "COMB")
 
-    r2_global = r2_score(comb_df["actual"].to_numpy(), comb_df["prediction"].to_numpy())
-    out_corr = eval_correlation(df=comb_df.to_pandas(),pfs=pfs, adj=adj, excntry=excntry, data_path=data_path)
+    out_corr = eval_correlation(
+            df=comb_df.to_pandas(),
+            excntry=excntry,
+            pfs=pfs,
+            adj=adj,
+            data_path=data_path
+        )
+
+    y_true = comb_df["actual"].to_numpy()
+    y_pred = comb_df["prediction"].to_numpy()
+
+    out_score = (
+        eval_classification(y_true.astype(int), y_pred.astype(int)) if adj == 2
+        else eval_regression(y_true, y_pred))
+
     comb_global = pl.DataFrame({
         "country": [excntry],
         "pfs": [pfs],
         "model": ["COMB"],
-        "r2": [r2_global],
+        "r2": [out_score["r2"]],
+        "balanced_accuracy": [out_score["balanced_accuracy"]],
         "spearman": [out_corr["spearman"]],
-        "pearson": [out_corr["pearson"]],
-    })
+        "pearson": [out_corr["pearson"]]})
 
     global_df = pl.concat([global_df, comb_global])
     global_df.write_parquet(results_global_path)
 
     return monthly_df, global_df
 
+def write_period_return_file(
+        all_port_ret_monthly, base, excntry, pfs, n_buckets, suffix, periods):
+
+    period_monthly_lst = []
+    period_global_lst = []
+
+    for period_name, (start_date, end_date) in periods.items():
+        
+        period_monthly_df = (
+            all_port_ret_monthly
+            .filter(
+                (pl.col("eom") >= pl.lit(start_date).str.strptime(pl.Date)) &
+                (pl.col("eom") <= pl.lit(end_date).str.strptime(pl.Date))
+            )
+            .with_columns([
+                pl.lit(period_name).alias("period"),
+                pl.lit(start_date).str.strptime(pl.Date).alias("start_date"),
+                pl.lit(end_date).str.strptime(pl.Date).alias("end_date"),
+            ])
+        )
+
+        if period_monthly_df.height == 0:
+            continue
+
+        period_monthly_lst.append(period_monthly_df)
+
+        period_global_df = (
+            period_monthly_df
+            .group_by(["model", "bucket"])
+            .agg(
+                pl.col("mean_ret_bucket_monthly").mean().alias("mean_ret_bucket_period"))
+            .with_columns([
+                pl.lit(excntry).alias("excntry"),
+                pl.lit(pfs).alias("pfs"),
+                pl.lit(n_buckets).alias("n_buckets"),
+                pl.lit(period_name).alias("period"),
+                pl.lit(start_date).str.strptime(pl.Date).alias("start_date"),
+                pl.lit(end_date).str.strptime(pl.Date).alias("end_date"),
+            ])
+        )
+
+
+        period_global_df = period_global_df.with_columns(
+            (
+                pl.col("mean_ret_bucket_period")
+                .filter(pl.col("bucket") == n_buckets).first().over("model")
+                -
+                pl.col("mean_ret_bucket_period")
+                .filter(pl.col("bucket") == 1).first().over("model")
+            ).alias("hml_ret_period")
+        )
+
+        period_global_lst.append(period_global_df)
+        
+    if len(period_monthly_lst) == 0:
+        return None, None
+
+    all_period_monthly_df = pl.concat(period_monthly_lst)
+    all_period_global_df = pl.concat(period_global_lst)
+
+    out_path_monthly = (
+        base / f"{excntry}_{pfs}_{n_buckets}_port_ret_period_month{suffix}.parquet")
+
+    out_path_global = (
+        base / f"{excntry}_{pfs}_{n_buckets}_port_ret_period_global{suffix}.parquet")
+
+    all_period_monthly_df.write_parquet(out_path_monthly)
+    all_period_global_df.write_parquet(out_path_global)
+
+    return all_period_monthly_df, all_period_global_df
+
 
 def build_strategy_returns(data_path, excntry, pfs, n_buckets, adj):
     
-    suffix = "_cross" if adj == 1 else ""
+    suffix = get_suffix(adj)
+
     base = data_path / "portfolio_returns"
         
     meta_path = data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta{suffix}.parquet"
-    model_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_ml_models_monthly{suffix}.parquet"
-    
-    out_path_mon = base/f"{excntry}_{pfs}_{n_buckets}_port_ret_monthly_avg{suffix}.parquet"
-    out_path_buck = base/f"{excntry}_{pfs}_{n_buckets}_factor_ret_to_bucket{suffix}.parquet"
-    out_path_gl = base/f"{excntry}_{pfs}_{n_buckets}_port_ret_global_avg{suffix}.parquet"
+    model_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_pred_month{suffix}.parquet"
 
     monthly_lst = []
     global_lst = []
@@ -2422,21 +2513,38 @@ def build_strategy_returns(data_path, excntry, pfs, n_buckets, adj):
 
         return df, port_ret_monthly, port_ret_global
 
-    oracle_buckets, oracle_monthly, oracle_global = run_sort(
-        eom_pred, "ret_raw", "ORACLE"
-    )
+    oracle_df = (eom_pred
+                 .select(["row_id", "eom", "ret_raw", "country", "pfs"])
+                 .unique())
+
+    oracle_buckets, oracle_monthly, oracle_global = run_sort(oracle_df, "ret_raw", "ORACLE")
 
     bucket_lst.append(oracle_buckets)
     monthly_lst.append(oracle_monthly)
     global_lst.append(oracle_global)
 
+
+    rng = np.random.default_rng(42)
+
+    random_df = (eom_pred.select(["row_id", "eom", "ret_raw", "country", "pfs"])
+                 .unique()
+                 .sort(["eom", "row_id"]))
+
+    random_df = random_df.with_columns(pl.Series("random_sort", rng.random(random_df.height)))
+
+    random_buckets, random_monthly, random_global = run_sort(random_df, "random_sort", "RANDOM")
+
+    bucket_lst.append(random_buckets)
+    monthly_lst.append(random_monthly)
+    global_lst.append(random_global)
+
     for model in models:
 
         df_model = eom_pred.filter(pl.col("model") == model)
 
-        ml_buckets, port_ret_monthly, port_ret_global = run_sort(
-            df_model, "prediction", model
-        )
+        sort_col = "probability" if adj == 2 else "prediction"
+
+        ml_buckets, port_ret_monthly, port_ret_global = run_sort(df_model, sort_col, model)
 
         bucket_lst.append(ml_buckets)
         monthly_lst.append(port_ret_monthly)
@@ -2446,11 +2554,30 @@ def build_strategy_returns(data_path, excntry, pfs, n_buckets, adj):
     all_port_ret_monthly = pl.concat(monthly_lst)
     all_port_ret_global = pl.concat(global_lst)
 
+    periods = {
+        "dotcom": ("2000-03-31", "2002-10-31"),
+        "gfc": ("2007-07-31", "2009-03-31"),
+        "covid": ("2020-02-29", "2021-12-31")}
+
+    all_port_ret_period_monthly, all_port_ret_period_global = write_period_return_file(
+        all_port_ret_monthly=all_port_ret_monthly,
+        base=base,
+        excntry=excntry,
+        pfs=pfs,
+        n_buckets=n_buckets,
+        suffix=suffix,
+        periods=periods
+    )
+
+    out_path_mon = base/f"{excntry}_{pfs}_{n_buckets}_port_ret_month{suffix}.parquet"
+    out_path_buck = base/f"{excntry}_{pfs}_{n_buckets}_factor_to_bucket{suffix}.parquet"
+    out_path_gl = base/f"{excntry}_{pfs}_{n_buckets}_port_ret_global{suffix}.parquet"
+
     all_port_ret_monthly.write_parquet(out_path_mon)
     all_port_ret_bucket.write_parquet(out_path_buck)
     all_port_ret_global.write_parquet(out_path_gl)
 
-    return all_port_ret_global
+    return all_port_ret_global, all_port_ret_monthly, all_port_ret_bucket, all_port_ret_period_monthly, all_port_ret_period_global
 
 
 def compute_turnover(df):
@@ -2485,31 +2612,47 @@ def compute_turnover(df):
 def eval_strategy_returns(
         data_path, excntry, pfs, n_buckets, adj):
 
-        meta_path = data_path/"factor_characteristics"/f"{excntry}_meta.parquet"
-
-        suffix = "_cross" if adj == 1 else ""
-
+        suffix = get_suffix(adj)
+        
         base = data_path / "portfolio_returns"
 
-        bucket_path = base / f"{excntry}_{pfs}_{n_buckets}_factor_ret_to_bucket{suffix}.parquet"
-        return_path = base / f"{excntry}_{pfs}_{n_buckets}_port_ret_monthly_avg{suffix}.parquet"
-        regressions_strategy_path = base / f"{excntry}_{pfs}_{n_buckets}_regression_strategy{suffix}.parquet"
-        regressions_bucket_path = base / f"{excntry}_{pfs}_{n_buckets}_regression_bucket{suffix}.parquet"
-        turnover_path = base / f"{excntry}_{pfs}_{n_buckets}_turnover{suffix}.parquet"
+        bucket_path = base/f"{excntry}_{pfs}_{n_buckets}_factor_to_bucket{suffix}.parquet"
+        return_path = base/f"{excntry}_{pfs}_{n_buckets}_port_ret_month{suffix}.parquet"
+        meta_path = data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta{suffix}.parquet"
+
 
         meta_data = pl.read_parquet(meta_path).select(["row_id", "characteristics"])
         factor_to_bucket = pl.read_parquet(bucket_path)
         strategy_returns = pl.read_parquet(return_path)
+
         ew_strategy_returns = (
                     factor_to_bucket
                     .select(["eom", "row_id", "ret_raw"]).unique()
                     .group_by("eom")
                     .agg(pl.col("ret_raw").mean().alias("ew_strategy_ret")))
+
+        random_hml_returns = (
+            strategy_returns
+            .filter(pl.col("model") == "RANDOM")
+            .group_by("eom")
+            .agg(
+                pl.col("hml_ret_monthly")
+                .first()
+                .alias("random_hml_ret"))
+        )
+
+        random_bucket_returns = (
+            strategy_returns
+            .filter(pl.col("model") == "RANDOM")
+            .select(["eom", "bucket", "mean_ret_bucket_monthly"])
+            .rename({"mean_ret_bucket_monthly": "random_bucket_ret"})
+        )
         
         ff_monthly = pl.read_parquet(data_path/"other_input"/"ff_monthly.parquet"
                                              ).with_columns(pl.col("eom").cast(pl.Date))
         
-        models = strategy_returns.select("model").unique().to_series().to_list()
+        models = (strategy_returns.filter(pl.col("model") != "RANDOM")
+                  .select("model").unique().to_series().to_list())
 
         regression_lst = []
         regression_bucket_lst = []
@@ -2518,33 +2661,43 @@ def eval_strategy_returns(
         for model in models:
             
             strat_model = strategy_returns.filter(pl.col("model") == model)
-            bucket_model = factor_to_bucket.filter(pl.col("model") == model)
 
             df_regress = (
                 strat_model
                 .group_by("eom")
                 .agg(pl.col("hml_ret_monthly").first().alias("strategy_ret"))
                 .join(ew_strategy_returns, on="eom", how="left")
+                .join(random_hml_returns, on="eom", how="left")
                 .join(ff_monthly, on="eom", how="left")
                 .sort("eom")
                 .to_pandas()
                 )
-            
+
+            df_regress = df_regress.dropna(
+                subset=["strategy_ret",
+                        "ew_strategy_ret",
+                        "random_hml_ret",
+                        "mkt", "smb", "hml", "rmw", "cma", "wml"])
+
             X_ff = df_regress[["mkt", "smb", "hml", "rmw", "cma", "wml"]]
             X_ff = sm.add_constant(X_ff)
             
             X_ew = df_regress[["ew_strategy_ret"]]
             X_ew = sm.add_constant(X_ew)
 
-           
+            X_random = df_regress[["random_hml_ret"]]
+            X_random = sm.add_constant(X_random)
+
             y = df_regress["strategy_ret"]
-            X_mean = pd.DataFrame({"const": 1}, index=range(len(y)))
+            X_mean = pd.DataFrame({"const": 1}, index=y.index)
 
             regress_mean = sm.OLS(y, X_mean).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
 
             regress_ff = sm.OLS(y, X_ff).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
             
             regress_ew = sm.OLS(y, X_ew).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
+
+            regress_random = sm.OLS(y, X_random).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
             
             regression_lst.append({
                 "country": excntry,
@@ -2556,7 +2709,11 @@ def eval_strategy_returns(
                 "alpha_ff": regress_ff.params["const"],
                 "tstat_ff": regress_ff.tvalues["const"],
                 "alpha_ew": regress_ew.params["const"],
-                "tstat_ew": regress_ew.tvalues["const"]})
+                "tstat_ew": regress_ew.tvalues["const"],
+                "alpha_random": regress_random.params["const"],
+                "tstat_random": regress_random.tvalues["const"]})
+
+            bucket_model = factor_to_bucket.filter(pl.col("model") == model)
             
             df_turnover = (
                 bucket_model
@@ -2582,6 +2739,7 @@ def eval_strategy_returns(
                 .select(["eom", "bucket", "mean_ret_bucket_monthly"])
                 .rename({"mean_ret_bucket_monthly": "ret"})
                 .join(ew_strategy_returns, on="eom", how="left")
+                .join(random_bucket_returns, on=["eom", "bucket"], how="left")
                 .join(ff_monthly, on="eom", how="left")
                 .sort("eom")
                 .to_pandas()
@@ -2589,7 +2747,12 @@ def eval_strategy_returns(
 
             for b in range(1, n_buckets + 1):
 
-                df_regress_bucket = df_b[df_b["bucket"] == b]
+                df_regress_bucket = df_b[df_b["bucket"] == b].dropna(
+                    subset=[
+                        "ret",
+                        "ew_strategy_ret",
+                        "random_bucket_ret",
+                        "mkt", "smb", "hml", "rmw", "cma", "wml"])
 
                 y = df_regress_bucket["ret"]
                 
@@ -2599,9 +2762,13 @@ def eval_strategy_returns(
                 X_ew = df_regress_bucket[["ew_strategy_ret"]]
                 X_ew = sm.add_constant(X_ew)
 
+                X_random = df_regress_bucket[["random_bucket_ret"]]
+                X_random = sm.add_constant(X_random)
+
                 regress_ff = sm.OLS(y, X_ff).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
                 regress_ew = sm.OLS(y, X_ew).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
-
+                regress_random = sm.OLS(y, X_random).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
+                
                 regression_bucket_lst.append({
                         "country": excntry,
                         "pfs": pfs,
@@ -2612,9 +2779,14 @@ def eval_strategy_returns(
                         "tstat_ff": regress_ff.tvalues["const"],
                         "alpha_ew": regress_ew.params["const"],
                         "tstat_ew": regress_ew.tvalues["const"],
+                        "alpha_random": regress_random.params["const"],
+                        "tstat_random": regress_random.tvalues["const"]
                     })
-                            
-            
+                
+        regressions_strategy_path = base / f"{excntry}_{pfs}_{n_buckets}_regress_strat{suffix}.parquet"
+        regressions_bucket_path = base / f"{excntry}_{pfs}_{n_buckets}_regress_buck{suffix}.parquet"
+        turnover_path = base / f"{excntry}_{pfs}_{n_buckets}_turnover{suffix}.parquet"
+
         all_regressions_strategy = pl.DataFrame(regression_lst)
         all_regressions_strategy.write_parquet(regressions_strategy_path)
         
@@ -2624,13 +2796,124 @@ def eval_strategy_returns(
         all_regressions_bucket = pl.DataFrame(regression_bucket_lst)
         all_regressions_bucket.write_parquet(regressions_bucket_path)
 
+        return all_regressions_strategy, all_turnovers, all_regressions_bucket
 
 
+def eval_strategy_returns_period(
+        data_path, excntry, pfs, n_buckets, adj):
 
-            
+    suffix = get_suffix(adj)
 
+    base = data_path / "portfolio_returns"
 
+    bucket_path = base / f"{excntry}_{pfs}_{n_buckets}_factor_to_bucket{suffix}.parquet"
+    period_return_path = base / f"{excntry}_{pfs}_{n_buckets}_port_ret_period_month{suffix}.parquet"
 
+    factor_to_bucket = pl.read_parquet(bucket_path)
+    strategy_returns = pl.read_parquet(period_return_path)
 
+    ew_strategy_returns = (
+        factor_to_bucket
+        .select(["eom", "row_id", "ret_raw"]).unique()
+        .group_by("eom")
+        .agg(pl.col("ret_raw").mean().alias("ew_strategy_ret"))
+    )
 
+    random_hml_returns = (
+        strategy_returns
+        .filter(pl.col("model") == "RANDOM")
+        .group_by(["period", "eom"])
+        .agg(
+            pl.col("hml_ret_monthly").first().alias("random_hml_ret")
+        )
+    )
 
+    ff_monthly = (
+        pl.read_parquet(data_path / "other_input" / "ff_monthly.parquet")
+        .with_columns(pl.col("eom").cast(pl.Date))
+    )
+
+    models = (
+        strategy_returns.filter(pl.col("model") != "RANDOM")
+        .select("model").unique().to_series().to_list())
+
+    periods = (
+        strategy_returns.select("period").unique().to_series().to_list())
+
+    regression_lst = []
+
+    for period in periods:
+
+        strategy_period = strategy_returns.filter(pl.col("period") == period)
+
+        for model in models:
+
+            strat_model = strategy_period.filter(pl.col("model") == model)
+
+            if strat_model.height == 0:
+                continue
+
+            df_regress = (
+                strat_model
+                .group_by(["period", "eom"])
+                .agg(pl.col("hml_ret_monthly").first().alias("strategy_ret"))
+                .join(ew_strategy_returns, on="eom", how="left")
+                .join(random_hml_returns, on=["period", "eom"], how="left")
+                .join(ff_monthly, on="eom", how="left")
+                .sort("eom")
+                .to_pandas()
+            )
+
+            df_regress = df_regress.dropna(
+                subset=["strategy_ret", "ew_strategy_ret","random_hml_ret",
+                        "mkt", "smb", "hml", "rmw", "cma", "wml"]
+            )
+
+            if len(df_regress) == 0:
+                continue
+
+            y = df_regress["strategy_ret"]
+
+            X_mean = pd.DataFrame({"const": 1}, index=y.index)
+
+            X_ff = df_regress[["mkt", "smb", "hml", "rmw", "cma", "wml"]]
+            X_ff = sm.add_constant(X_ff)
+
+            X_ew = df_regress[["ew_strategy_ret"]]
+            X_ew = sm.add_constant(X_ew)
+
+            X_random = df_regress[["random_hml_ret"]]
+            X_random = sm.add_constant(X_random)
+
+            regress_mean = sm.OLS(y, X_mean).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
+
+            regress_ff = sm.OLS(y, X_ff).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
+
+            regress_ew = sm.OLS(y, X_ew).fit(cov_type="HAC",cov_kwds={"maxlags": 6})
+
+            regress_random = sm.OLS(y, X_random).fit(cov_type="HAC", cov_kwds={"maxlags": 6})
+
+            regression_lst.append({
+                "country": excntry,
+                "pfs": pfs,
+                "model": model,
+                "period": period,
+                "n_buckets": n_buckets,
+                "n_months": len(df_regress),
+                "alpha_mean": regress_mean.params["const"],
+                "tstat_mean": regress_mean.tvalues["const"],
+                "alpha_ff": regress_ff.params["const"],
+                "tstat_ff": regress_ff.tvalues["const"],
+                "alpha_ew": regress_ew.params["const"],
+                "tstat_ew": regress_ew.tvalues["const"],
+                "alpha_random": regress_random.params["const"],
+                "tstat_random": regress_random.tvalues["const"],
+            })
+
+    all_period_regressions = pl.DataFrame(regression_lst)
+
+    out_path = base/f"{excntry}_{pfs}_{n_buckets}_regress_strat_period{suffix}.parquet"
+
+    all_period_regressions.write_parquet(out_path)
+
+    return all_period_regressions
