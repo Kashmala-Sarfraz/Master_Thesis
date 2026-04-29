@@ -222,7 +222,7 @@ def measure_time(func):
         return result
     return wrapper
 
-def setup_folder_structure(data_path):
+def setup_folder_structure(data_path, base_path):
     """
     Description:
         Create the projects folder structure before dowloading data
@@ -241,6 +241,7 @@ def setup_folder_structure(data_path):
     (data_path/"other_input").mkdir(parents=True, exist_ok=True)
     (data_path/"factor_characteristics").mkdir(parents=True, exist_ok=True)
     (data_path/"ml_model_output").mkdir(parents=True, exist_ok=True)
+    (base_path/"exhibits").mkdir(parents=True, exist_ok=True)
 
 def gen_wrds_connection_info(username, password):
     return (
@@ -2277,8 +2278,9 @@ def eval_model(data_path, pfs, excntry, adj):
 def add_comb_model(excntry, pfs, data_path, adj):
     
     suffix = get_suffix(adj)
-
-    results_monthly_path = data_path/"ml_model_output"/f"{excntry}_{pfs}_pred_month{suffix}.parquet"
+    base = data_path/"ml_model_output"
+    results_monthly_path = base / f"{excntry}_{pfs}_pred_month{suffix}.parquet"
+    vi_month_path = base / f"{excntry}_{pfs}_vi_month{suffix}.parquet"
 
     monthly_df = pl.read_parquet(results_monthly_path).filter(pl.col("model") != "COMB")
 
@@ -2348,7 +2350,41 @@ def add_comb_model(excntry, pfs, data_path, adj):
     global_df = pl.concat([global_df, comb_global])
     global_df.write_parquet(results_global_path)
 
-    return monthly_df, global_df
+
+    vi_month_df = pl.read_parquet(vi_month_path).filter(pl.col("model") != "COMB")
+
+    comb_vi_month_df = (
+        vi_month_df
+        .group_by(["feature", "country", "pfs", "test_start"])
+        .agg(pl.col("importance").mean().alias("importance"))
+        .with_columns(pl.lit("COMB").alias("model"))
+    )
+
+    comb_vi_month_df = comb_vi_month_df.select(vi_month_df.columns)
+
+    vi_month_df = pl.concat([vi_month_df, comb_vi_month_df], how="diagonal")
+    vi_month_df.write_parquet(vi_month_path)
+
+    vi_global_path = base / f"{excntry}_{pfs}_vi_global{suffix}.parquet"
+
+    vi_global_df = (
+        vi_month_df
+        .group_by(["feature", "model", "country", "pfs"])
+        .agg(pl.col("importance").mean().alias("importance"))
+        .with_columns(
+            (
+                pl.col("importance")
+                / pl.col("importance").sum().over(["model", "country", "pfs"])
+            )
+            .fill_nan(0)
+            .fill_null(0)
+            .alias("importance")
+        )
+    )
+
+    vi_global_df.write_parquet(vi_global_path)
+
+    return monthly_df, global_df, vi_month_df, vi_global_df
 
 def write_period_return_file(
         all_port_ret_monthly, base, excntry, pfs, n_buckets, suffix, periods):
@@ -2550,7 +2586,7 @@ def build_strategy_returns(data_path, excntry, pfs, n_buckets, adj):
         monthly_lst.append(port_ret_monthly)
         global_lst.append(port_ret_global)
 
-    all_port_ret_bucket = pl.concat(bucket_lst)
+    all_port_ret_bucket = pl.concat(bucket_lst, how="diagonal_relaxed")
     all_port_ret_monthly = pl.concat(monthly_lst)
     all_port_ret_global = pl.concat(global_lst)
 
@@ -2917,3 +2953,355 @@ def eval_strategy_returns_period(
     all_period_regressions.write_parquet(out_path)
 
     return all_period_regressions
+
+def compute_backtest_metrics(data_path, excntry, pfs, n_buckets, adj):
+    
+    suffix = get_suffix(adj)
+    base = data_path / "portfolio_returns"
+
+    bucket_path = base / f"{excntry}_{pfs}_{n_buckets}_factor_to_bucket{suffix}.parquet"
+    return_path = base / f"{excntry}_{pfs}_{n_buckets}_port_ret_month{suffix}.parquet"
+    meta_path = data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta{suffix}.parquet"
+
+    factor_to_bucket = pl.read_parquet(bucket_path).filter(pl.col("model") != "ORACLE")
+    strategy_returns = pl.read_parquet(return_path).filter(pl.col("model") != "ORACLE")
+
+    meta = (
+        pl.read_parquet(meta_path)
+        .select(["row_id", "characteristics"])
+    )
+    
+    factor_to_bucket = factor_to_bucket.join(meta, on="row_id", how="left")
+
+    def net_performance(ret):
+        ret = pd.Series(ret).dropna()
+
+        if len(ret) == 0:
+            return np.nan
+
+        return (1 + ret).prod() - 1
+    
+    def sharpe_ratio(ret):
+        ret = pd.Series(ret).dropna()
+
+        if len(ret) < 2:
+            return np.nan
+
+        std = ret.std(ddof=1)
+
+        if std == 0:
+            return np.nan
+
+        return ret.mean() / std * np.sqrt(12)
+    
+    def sortino_ratio(ret):
+        ret = pd.Series(ret).dropna()
+        downside = ret[ret < 0]
+
+        if len(ret) < 2 or len(downside) < 2:
+            return np.nan
+
+        downside_std = downside.std(ddof=1)
+
+        if downside_std == 0:
+            return np.nan
+
+        return ret.mean() / downside_std * np.sqrt(12)
+
+    def max_drawdown(ret):
+        ret = pd.Series(ret).dropna()
+
+        if len(ret) == 0:
+            return np.nan
+
+        wealth = (1 + ret).cumprod()
+        peak = wealth.cummax()
+        drawdown = wealth / peak - 1
+
+        return drawdown.min()
+
+    def streak_stats(condition):
+        condition = pd.Series(condition).dropna().astype(bool)
+
+        streaks = []
+        current = 0
+
+        for val in condition:
+            if val:
+                current += 1
+            else:
+                if current > 0:
+                    streaks.append(current)
+                current = 0
+
+        if current > 0:
+            streaks.append(current)
+
+        if len(streaks) == 0:
+            return 0.0, 0
+
+        return float(np.mean(streaks)), int(np.max(streaks))
+    
+    active = (
+        factor_to_bucket
+        .filter(pl.col("bucket").is_in([1, n_buckets]))
+        .with_columns(
+            pl.when(pl.col("bucket") == n_buckets)
+            .then(pl.lit("LONG"))
+            .otherwise(pl.lit("SHORT"))
+            .alias("side")
+        )
+        .select(["model", "eom", "characteristics", "side"])
+        .unique()
+        .sort(["model", "eom", "side", "characteristics"])
+    )
+
+    monthly_positions = (
+        active
+        .group_by(["model", "eom"])
+        .agg([
+            pl.len().alias("positions"),
+            (pl.col("side") == "LONG").sum().alias("long_positions"),
+            (pl.col("side") == "SHORT").sum().alias("short_positions"),
+            pl.struct(["characteristics", "side"]).alias("position_set"),
+        ])
+        .sort(["model", "eom"])
+    )
+
+    monthly_positions = monthly_positions.with_columns(
+        pl.col("position_set").shift(1).over("model").alias("prev_position_set")
+    )
+
+    monthly_positions = monthly_positions.with_columns([
+        pl.struct(["position_set", "prev_position_set"]).map_elements(
+            lambda x: (
+                len(
+                    set((p["characteristics"], p["side"]) for p in x["position_set"])
+                    -
+                    set((p["characteristics"], p["side"]) for p in x["prev_position_set"])
+                )
+                if x["prev_position_set"] is not None else None
+            ),
+            return_dtype=pl.Int64
+        ).alias("entry_trades"),
+
+        pl.struct(["position_set", "prev_position_set"]).map_elements(
+            lambda x: (
+                len(
+                    set((p["characteristics"], p["side"]) for p in x["prev_position_set"])
+                    -
+                    set((p["characteristics"], p["side"]) for p in x["position_set"])
+                )
+                if x["prev_position_set"] is not None else None
+            ),
+            return_dtype=pl.Int64
+        ).alias("exit_trades"),
+    ])
+
+    monthly_positions = monthly_positions.with_columns(
+        (
+            pl.col("entry_trades") + pl.col("exit_trades")
+        ).alias("trades")
+    )
+
+    monthly_positions = monthly_positions.with_columns([
+        (
+            pl.col("entry_trades") + pl.col("exit_trades")
+        ).alias("trades"),
+
+        (
+            (pl.col("entry_trades") + pl.col("exit_trades"))
+            / pl.col("positions")
+        ).alias("turnover")
+    ])
+
+    monthly_positions = monthly_positions.drop(["position_set", "prev_position_set"])
+
+    monthly_returns = (
+        strategy_returns
+        .group_by(["model", "eom"])
+        .agg(pl.col("hml_ret_monthly").first().alias("strategy_ret"))
+        .join(monthly_positions, on=["model", "eom"], how="left")
+        .sort(["model", "eom"])
+    )
+
+    monthly_pd = monthly_returns.to_pandas()
+    monthly_pd["eom"] = pd.to_datetime(monthly_pd["eom"])
+
+    metrics_lst = []
+
+    for model, df_model in monthly_pd.groupby("model"):
+
+        df_model = df_model.sort_values("eom").copy()
+        ret = df_model["strategy_ret"].dropna()
+
+        if len(ret) == 0:
+            continue
+
+        wins = ret[ret > 0]
+        losses = ret[ret < 0]
+
+        win_streak_avg, win_streak_max = streak_stats(ret > 0)
+        loss_streak_avg, loss_streak_max = streak_stats(ret < 0)
+
+        average_win = wins.mean() if len(wins) > 0 else np.nan
+        average_loss = losses.mean() if len(losses) > 0 else np.nan
+
+        reward_to_risk_ratio = (
+            abs(average_win / average_loss)
+            if pd.notna(average_win)
+            and pd.notna(average_loss)
+            and average_loss != 0
+            else np.nan
+        )
+
+        metrics_lst.append({
+            "country": excntry,
+            "pfs": pfs,
+            "model": model,
+            "n_buckets": n_buckets,
+            "average_return": ret.mean(),
+            "return_std": ret.std(ddof=1) if len(ret) > 1 else np.nan,
+            "sharpe_ratio": sharpe_ratio(ret),
+            "sortino_ratio": sortino_ratio(ret),
+            "net_performance": net_performance(ret),
+            "max_drawdown": max_drawdown(ret),
+            "wins": len(wins),
+            "losses": len(losses),
+            "average_win": average_win,
+            "average_loss": average_loss,
+            "reward_to_risk_ratio": reward_to_risk_ratio,
+            "loss_std": losses.std(ddof=1) if len(losses) > 1 else np.nan,
+            #"win_streak_avg": win_streak_avg,
+            "win_streak_max": win_streak_max,
+            #"loss_streak_avg": loss_streak_avg,
+            "loss_streak_max": loss_streak_max,
+            "trades_per_month": df_model["trades"].mean(),
+            "active_positions": df_model["positions"].mean(),
+            "turnover": df_model["turnover"].mean(),
+            #"entry_trades": df_model["entry_trades"].mean(),
+            #"exit_trades": df_model["exit_trades"].mean(),
+            #"long_positions": df_model["long_positions"].mean(),
+            #"short_positions": df_model["short_positions"].mean(),
+            "n_months": len(ret),
+        })
+
+    metrics_global = pl.from_pandas(pd.DataFrame(metrics_lst))
+
+    out_path_month = base / f"{excntry}_{pfs}_{n_buckets}_backtest_metrics_month{suffix}.parquet"
+    out_path_global = base / f"{excntry}_{pfs}_{n_buckets}_backtest_metrics_global{suffix}.parquet"
+
+    monthly_returns.write_parquet(out_path_month)
+    metrics_global.write_parquet(out_path_global)
+
+    return monthly_returns, metrics_global
+
+
+def plot_cumulative_performance(
+        base_path, data_path, excntry, pfs, n_buckets, adj,
+        save=True, show=False):
+
+    import matplotlib.pyplot as plt
+
+    suffix = get_suffix(adj)
+    base = data_path / "portfolio_returns"
+
+    return_path = base / f"{excntry}_{pfs}_{n_buckets}_port_ret_month{suffix}.parquet"
+    plot_dir = base_path / "exhibits"
+   
+
+    strategy_returns = (
+        pl.read_parquet(return_path)
+        .filter((pl.col("model") != "ORACLE") & (pl.col("model") != "RANDOM"))
+        .with_columns(pl.col("eom").cast(pl.Date))
+        .sort(["model", "bucket", "eom"])
+    )
+
+    models = (
+        strategy_returns
+        .select("model")
+        .unique()
+        .to_series()
+        .to_list()
+    )
+
+    out_paths = {}
+
+    for model in models:
+
+        df_model = (
+            strategy_returns
+            .filter(pl.col("model") == model)
+            .sort(["bucket", "eom"])
+            .to_pandas()
+        )
+
+        df_model["eom"] = pd.to_datetime(df_model["eom"])
+
+        bucket_cum = (
+            df_model
+            .sort_values(["bucket", "eom"])
+            .assign(
+                cumulative_return=lambda x:
+                    x.groupby("bucket")["mean_ret_bucket_monthly"]
+                     .transform(lambda r: r.cumsum() * 100)
+            )
+        )
+
+        hml_cum = (
+            df_model[["eom", "hml_ret_monthly"]]
+            .drop_duplicates(subset=["eom"])
+            .sort_values("eom")
+            .assign(cumulative_hml=lambda x: x["hml_ret_monthly"].cumsum() * 100
+            )
+        )
+
+        fig, ax = plt.subplots(figsize=(12, 7))
+
+        for bucket in sorted(bucket_cum["bucket"].unique()):
+
+            tmp = bucket_cum[bucket_cum["bucket"] == bucket]
+
+            ax.plot(
+                tmp["eom"],
+                tmp["cumulative_return"],
+                linewidth=1,
+                alpha=0.75,
+                label=f"Bucket {bucket}"
+            )
+
+        ax.plot(
+            hml_cum["eom"],
+            hml_cum["cumulative_hml"],
+            linewidth=2.5,
+            linestyle="--",
+            label="HML"
+        )
+
+        ax.axhline(0, linewidth=1)
+
+        ax.set_title(
+            f"Cumulative Bucket and HML Performance - {model} "
+            f"({excntry}, {pfs}, {n_buckets} buckets)"
+        )
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Cumulative Return")
+        ax.legend(ncol=2, fontsize=9)
+        ax.grid(True, alpha=0.3)
+
+        fig.tight_layout()
+
+        if save:
+            out_path = (
+                plot_dir
+                / f"{excntry}_{pfs}_{n_buckets}_{model}_cum_perf{suffix}.png"
+            )
+            fig.savefig(out_path, dpi=300, bbox_inches="tight")
+            out_paths[model] = out_path
+
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+
+    return out_paths
