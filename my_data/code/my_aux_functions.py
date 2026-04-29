@@ -1089,10 +1089,10 @@ def predict_with_pls(X_train, y_train,
                      y_train_val, X_test, y_test,
                      y_pred_split, y_true_split):
                      
-    param_dist = {"n_components": list(range(1, 11))}
+    param_dist = {"n_components": list(range(1, 15))}
     
     best_params = tune_model_with_val(
-        PLSRegression(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=10)
+        PLSRegression(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=1)
     
     print(f"PLS best params: {best_params}")
 
@@ -1116,15 +1116,26 @@ def predict_with_lasso(X_train,y_train,
                        y_pred_split, y_true_split):
 
     
-    param_dist = {"alpha": np.logspace(-3, np.log10(0.002), 100)}
+    #param_dist = {"alpha": np.logspace(-3, np.log10(0.002), 100)}
+
+    param_dist = {"alpha": np.logspace(-5, 0, 150)}
 
     best_params = tune_model_with_val(
-            Lasso(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=20)
+            Lasso(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=1)
     print(f"Lasso best params: {best_params}")
 
     best_model = Lasso(max_iter=5000, **best_params)
-
     best_model.fit(X_train_val, y_train_val)
+
+    n_relax = 0
+    max_relax = 10
+
+    while np.sum(np.abs(best_model.coef_) > 1e-12) < 2 and n_relax < max_relax:
+        best_params["alpha"] = best_params["alpha"] / 2
+        n_relax += 1
+        best_model = Lasso(max_iter=5000, **best_params)
+        best_model.fit(X_train_val, y_train_val)
+
     y_pred = best_model.predict(X_test)
 
     n_total = len(best_model.coef_)
@@ -1146,36 +1157,38 @@ def predict_with_lasso_cls(
         X_test, y_test,
         y_pred_split, y_true_split, y_prob_split):
 
-    param_dist = {
-        "C": np.logspace(-3, 2, 50)
-    }
+    #param_dist = {"C": np.logspace(-3, 2, 50)}
+
+    param_dist = {"C": np.logspace(-4, 4, 150)}
+
 
     best_params = tune_classifier_with_val(
         LogisticRegression(
-            penalty="l1",
-            solver="saga",
-            max_iter=5000,
-            random_state=42,
-            n_jobs=-1
-        ),
+            penalty="l1", solver="saga", max_iter=5000, random_state=42, n_jobs=-1),
         param_dist,
-        X_train, y_train,
-        X_val, y_val,
-        n_iter=20
+        X_train,
+        y_train,
+        X_val,
+        y_val,
+        n_iter=1
     )
 
     print(f"LASSO_CLS best params: {best_params}")
 
     best_model = LogisticRegression(
-        penalty="l1",
-        solver="saga",
-        max_iter=5000,
-        random_state=42,
-        n_jobs=-1,
-        **best_params
-    )
-
+        penalty="l1", solver="saga", max_iter=5000, random_state=42, n_jobs=-1, **best_params)
     best_model.fit(X_train_val, y_train_val)
+
+    n_relax = 0
+    max_relax = 10
+
+    while np.sum(np.abs(best_model.coef_) > 1e-12) < 2 and n_relax < max_relax:
+        best_params["C"] = best_params["C"] * 2
+        n_relax += 1
+        best_model = LogisticRegression(
+            penalty="l1", solver="saga", max_iter=5000, random_state=42, n_jobs=-1, **best_params)
+        best_model.fit(X_train_val, y_train_val)
+
     y_pred = best_model.predict(X_test)
     y_prob = get_pos_class_proba(best_model, X_test)
 
@@ -1196,15 +1209,28 @@ def predict_with_lasso_cls(
 def predict_with_enet(X_train, y_train, X_val, y_val, X_train_val, y_train_val, X_test, y_test,
                       y_pred_split, y_true_split):
                       
-    param_dist = {"alpha": np.logspace(-3, np.log10(0.004), 50)}
+    #param_dist = {"alpha": np.logspace(-3, np.log10(0.004), 50)}
+
+    param_dist = {"alpha": np.logspace(-5, 0, 150)}
 
     best_params = tune_model_with_val(
-            ElasticNet(max_iter=5000, l1_ratio=0.5), param_dist, X_train, y_train, X_val, y_val, n_iter=20)
+            ElasticNet(max_iter=5000, l1_ratio=0.5),
+            param_dist, X_train, y_train, X_val, y_val, n_iter=1)
 
     print(f"ENET best params: {best_params}")
 
     best_model = ElasticNet(max_iter=5000, l1_ratio=0.5, **best_params)
     best_model.fit(X_train_val, y_train_val)
+
+    n_relax = 0
+    max_relax = 10
+
+    while np.sum(np.abs(best_model.coef_) > 1e-12) < 2 and n_relax < max_relax:
+        best_params["alpha"] = best_params["alpha"] / 2
+        n_relax +=1
+        best_model = ElasticNet(max_iter=5000, l1_ratio=0.5, **best_params)
+        best_model.fit(X_train_val, y_train_val)
+
     y_pred = best_model.predict(X_test)
 
     n_total = len(best_model.coef_)
@@ -1226,7 +1252,9 @@ def predict_with_enet_cls(
         X_test, y_test,
         y_pred_split, y_true_split, y_prob_split):
 
-    param_dist = {"C": np.logspace(-3, 2, 50)}
+    #param_dist = {"C": np.logspace(-3, 2, 50)}
+
+    param_dist = {"C": np.logspace(-4, 4, 150), "l1_ratio": [0.25, 0.5, 0.75]}
 
     best_params = tune_classifier_with_val(
         LogisticRegression(
@@ -1234,28 +1262,32 @@ def predict_with_enet_cls(
             solver="saga",
             max_iter=5000,
             random_state=42,
-            l1_ratio= 0.5,
             n_jobs=-1
         ),
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=20
+        n_iter=1
     )
 
     print(f"ENET_CLS best params: {best_params}")
 
     best_model = LogisticRegression(
-        penalty="elasticnet",
-        solver="saga",
-        max_iter=5000,
-        random_state=42,
-        n_jobs=-1,
-        l1_ratio= 0.5,
-        **best_params
-    )
-
+        penalty="elasticnet", solver="saga", max_iter=5000,
+        random_state=42, n_jobs=-1, **best_params)
     best_model.fit(X_train_val, y_train_val)
+
+    n_relax = 0
+    max_relax = 10
+
+    while np.sum(np.abs(best_model.coef_) > 1e-12) < 2 and n_relax < max_relax:
+        best_params["C"] = best_params["C"] * 2
+        n_relax += 1
+        best_model = LogisticRegression(
+            penalty="elasticnet", solver="saga", max_iter=5000,
+            random_state=42, n_jobs=-1, **best_params)
+        best_model.fit(X_train_val, y_train_val)
+
     y_pred = best_model.predict(X_test)
     y_prob = get_pos_class_proba(best_model, X_test)
 
@@ -1279,14 +1311,14 @@ def predict_with_rf(X_train, y_train, X_val, y_val, X_train_val, y_train_val,
 
     param_dist = {
         "n_estimators": [100, 200],
-        "max_depth": [3, 5, 7],
-        "min_samples_leaf": [5, 10],
-        "max_features": ["sqrt", 0.3]
+        "max_depth": [3, 5, 7, 10],
+        "min_samples_leaf": [1, 2, 5, 10],
+        "max_features": ["sqrt", 0.3, 0.5, 0.8],
     }
 
     best_params = tune_model_with_val(
         RandomForestRegressor(random_state=42, n_jobs=-1),
-        param_dist, X_train, y_train, X_val, y_val, n_iter=10)
+        param_dist, X_train, y_train, X_val, y_val, n_iter=1)
 
     print(f"RF best params: {best_params}")
 
@@ -1312,9 +1344,9 @@ def predict_with_rf_cls(
 
     param_dist = {
         "n_estimators": [100, 200],
-        "max_depth": [3, 5, 7],
-        "min_samples_leaf": [5, 10],
-        "max_features": ["sqrt", 0.3]
+        "max_depth": [3, 5, 7, 10],
+        "min_samples_leaf": [1, 2, 5, 10],
+        "max_features": ["sqrt", 0.3, 0.5, 0.8],
     }
 
     best_params = tune_classifier_with_val(
@@ -1322,7 +1354,7 @@ def predict_with_rf_cls(
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=10
+        n_iter=1
     )
 
     print(f"RF_CLS best params: {best_params}")
@@ -1353,9 +1385,9 @@ def predict_with_gbrt(
         y_pred_split, y_true_split):
     
     param_dist = {
-        "learning_rate": [0.03, 0.05],
-        "max_depth": [5, 7],
-        "min_samples_leaf": [10, 20],
+        "learning_rate": [0.03, 0.05, 0.1],
+        "max_depth": [3, 5, 7],
+        "min_samples_leaf": [10, 20, 50],
         "max_iter": [100, 200]
     }
 
@@ -1364,7 +1396,7 @@ def predict_with_gbrt(
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=8
+        n_iter=1
         
     )
     print(f"GBRT best params: {best_params}")
@@ -1390,9 +1422,9 @@ def predict_with_gbrt_cls(
         y_pred_split, y_true_split, y_prob_split):
 
     param_dist = {
-        "learning_rate": [0.03, 0.05],
-        "max_depth": [5, 7],
-        "min_samples_leaf": [10, 20],
+        "learning_rate": [0.03, 0.05, 0.1],
+        "max_depth": [3, 5, 7],
+        "min_samples_leaf": [10, 20, 50],
         "max_iter": [100, 200]
     }
 
@@ -1401,7 +1433,7 @@ def predict_with_gbrt_cls(
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=8
+        n_iter=1
     )
 
     print(f"GBRT-cls best params: {best_params}")
@@ -1433,10 +1465,10 @@ def predict_with_xgb(
     best_params = None
     best_iteration = None
 
-    for lr in [0.03, 0.1]:
-        for max_d in [5, 7]:
+    for lr in [0.05, 0.1]:
+        for max_d in [3, 5, 7]:
             for subs in [0.6, 0.8]:
-                for colsample in [0.6, 0.8]:
+                for colsample in [0.7, 0.9]:
                     for reg_lambda in [1, 5]:
                         for min_child_weight in [1, 5]:
                             
@@ -1517,10 +1549,10 @@ def predict_with_xgb_cls(
     best_params = None
     best_iteration = None
 
-    for lr in [0.03, 0.1]:
-        for max_d in [5, 7]:
+    for lr in [0.05, 0.1]:
+        for max_d in [3, 5, 7]:
             for subs in [0.6, 0.8]:
-                for colsample in [0.6, 0.8]:
+                for colsample in [0.7, 0.9]:
                     for reg_lambda in [1, 5]:
                         for min_child_weight in [1, 5]:
 
@@ -1594,8 +1626,10 @@ def predict_with_xgb_cls(
 def predict_with_ffnn(X_train, y_train, X_val, y_val, X_train_val, y_train_val, X_test, y_test,  y_pred_split, y_true_split):
     
     param_dist = {
-    "learning_rate_init": [0.0003, 0.001],
-    "alpha": [0.001, 0.002, 0.01, 0.05]}
+        "learning_rate_init": [0.0001, 0.0003, 0.001],
+        "alpha": [0.0001, 0.001, 0.01, 0.05],
+        "batch_size": [32, 64, 128]
+    }
 
     best_params = tune_model_with_val(
         MLPRegressor(
@@ -1608,7 +1642,7 @@ def predict_with_ffnn(X_train, y_train, X_val, y_val, X_train_val, y_train_val, 
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=10,
+        n_iter=20,
         
     )
 
@@ -1642,8 +1676,9 @@ def predict_with_ffnn_cls(
         y_pred_split, y_true_split, y_prob_split):
 
     param_dist = {
-        "learning_rate_init": [0.0003, 0.001],
-        "alpha": [0.001, 0.002, 0.01, 0.05]
+        "learning_rate_init": [0.0001, 0.0003, 0.001],
+        "alpha": [0.0001, 0.001, 0.01, 0.05],
+        "batch_size": [32, 64, 128]
     }
 
     best_params = tune_classifier_with_val(
@@ -1658,7 +1693,7 @@ def predict_with_ffnn_cls(
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=8
+        n_iter=20
     )
 
     print(f"FFNN_CLS best params: {best_params}")
@@ -1849,20 +1884,26 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model, adj):
 
     if adj == 2:
         if model == "all":
-            models_to_run = ["LOGIT_CLS", "LASSO_CLS", "ENET_CLS", "RF_CLS", "GBRT_CLS", "XGB_CLS", "FFNN_CLS"]
+            models_to_run = ["LOGIT_CLS", "LASSO_CLS", "ENET_CLS", "RF_CLS", "GBRT_CLS", "XGB_CLS"] #, "FFNN_CLS"
         elif isinstance(model, str):
             models_to_run = [model.upper()]
         else:
             models_to_run = [m.upper() for m in model]
     else:
         if model == "all":
-            models_to_run = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB", "FFNN"]
+            models_to_run = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB"] #, "FFNN"
         elif isinstance(model, str):
             models_to_run = [model.upper()]
         else:
             models_to_run = [m.upper() for m in model]
+            
+    n_splits = len(splits_idx)
+    
+    for split_no, split in enumerate(splits_idx, start=1):
 
-    for split in splits_idx:
+        print("\n" + "=" * 60)
+        print(f"SPLIT {split_no}/{n_splits}")
+        print("=" * 60)
 
         train_index = split["train"]
         val_index = split["val"]
@@ -1980,19 +2021,19 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model, adj):
                 vi_split.setdefault("XGB_CLS", []).append(result.importances_mean)
 
 
-            if "FFNN_CLS" in models_to_run:
-                model_ffnn_cls = predict_with_ffnn_cls(
-                    X_train=X_train, y_train=y_train,
-                    X_val=X_val, y_val=y_val,
-                    X_train_val=X_train_val, y_train_val=y_train_val,
-                    X_test=X_test, y_test=y_test,
-                    y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
-                )
+            # if "FFNN_CLS" in models_to_run:
+            #     model_ffnn_cls = predict_with_ffnn_cls(
+            #         X_train=X_train, y_train=y_train,
+            #         X_val=X_val, y_val=y_val,
+            #         X_train_val=X_train_val, y_train_val=y_train_val,
+            #         X_test=X_test, y_test=y_test,
+            #         y_pred_split=y_pred_split, y_true_split=y_true_split, y_prob_split=y_prob_split
+            #     )
 
-                result = permutation_importance(
-                    model_ffnn_cls, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy")
+            #     result = permutation_importance(
+            #         model_ffnn_cls, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42, scoring="balanced_accuracy")
 
-                vi_split.setdefault("FFNN_CLS", []).append(result.importances_mean)
+            #     vi_split.setdefault("FFNN_CLS", []).append(result.importances_mean)
 
         else:
             
@@ -2088,20 +2129,20 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model, adj):
                 vi_split.setdefault("GBRT", []).append(result.importances_mean)
 
 
-            if "FFNN" in models_to_run:
+            # if "FFNN" in models_to_run:
 
-                model_ffnn = predict_with_ffnn(
-                    X_train=X_train, y_train=y_train,
-                    X_val=X_val, y_val=y_val,
-                    X_train_val=X_train_val, y_train_val=y_train_val,
-                    X_test=X_test, y_test=y_test,
-                    y_pred_split=y_pred_split, y_true_split=y_true_split
-                )
+            #     model_ffnn = predict_with_ffnn(
+            #         X_train=X_train, y_train=y_train,
+            #         X_val=X_val, y_val=y_val,
+            #         X_train_val=X_train_val, y_train_val=y_train_val,
+            #         X_test=X_test, y_test=y_test,
+            #         y_pred_split=y_pred_split, y_true_split=y_true_split
+            #     )
 
-                result = permutation_importance(
-                    model_ffnn, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
+            #     result = permutation_importance(
+            #         model_ffnn, X_test, y_test, n_repeats=5, n_jobs=-1, random_state=42)
 
-                vi_split.setdefault("FFNN", []).append(result.importances_mean)
+            #     vi_split.setdefault("FFNN", []).append(result.importances_mean)
 
 
             if "XGB" in models_to_run:
