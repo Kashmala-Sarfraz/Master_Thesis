@@ -7,6 +7,7 @@ import os
 from my_wrds_credentials import get_wrds_credentials
 
 from my_aux_functions import(
+    pre_clean_jpn,
     setup_folder_structure,
     download_stock_characteristics,
     nyse_size_cutoffs,
@@ -29,8 +30,8 @@ DATA_DIR = BASE_DIR / "data"
 setup_folder_structure(data_path=DATA_DIR, base_path=BASE_DIR)
 #%% 
 # Import raw stock data from WRDS
-# creds = get_wrds_credentials()
-# download_stock_characteristics(username=creds.username, password=creds.password, data_path=DATA_DIR)
+creds = get_wrds_credentials()
+download_stock_characteristics(username=creds.username, password=creds.password, data_path=DATA_DIR)
 #%% 
 # Create other necessary inputs
 nyse_size_cutoffs(data_path=DATA_DIR)
@@ -39,10 +40,12 @@ nyse_cutoffs = pl.read_parquet(DATA_DIR/"other_input"/"nyse_cutoffs.parquet")
 ret_cutoffs = pl.read_parquet(DATA_DIR/"other_input"/"return_cutoffs.parquet")
 ret_cutoffs = ret_cutoffs.with_columns((pl.col("eom").dt.month_start().dt.offset_by("-1d")).alias("eom_lag1"))
 #%% 
+pre_clean_jpn(data_path=DATA_DIR)
+#%%
 # Create stock level portfolios
 lms_ret = {}
-for ex in ["USA"]:
-    for pfs in [10]: #3, 4, 10
+for ex in ["USA", "JPN"]:
+    for pfs in [10, 3, 4]:
 
         key = (ex, pfs)
         print(key)
@@ -50,27 +53,26 @@ for ex in ["USA"]:
         lms_ret[key] = factor_returns(
             data_path=DATA_DIR, excntry=ex, nyse_cutoffs_df=nyse_cutoffs, ret_cutoffs_df=ret_cutoffs, bp_min_n=10,pfs=pfs)
 #%% 
-# Build feature and target      
 feature = {}
 target = {}
 
-for cntry in ["USA"]:
-    for pfs in [10, 3]: #3, 4, 10
+for cntry in ["USA", "JPN"]:
+    for pfs in [10, 3, 4]:
         for adjust in [0, 1, 2]:
 
             key = (cntry, pfs, adjust)
 
             print(key)
 
-            feature[key], target [key] = build_factor_characteristics(
+            feature[key], target[key] = build_factor_characteristics(
                 data_path=DATA_DIR, excntry=cntry, pfs=pfs, adj=adjust)
 
 #%% 
 # Define train, val and test periods
 splits_idx = {}
 
-for cntry in ["USA"]:  # , "JPN"
-    for pfs in [10, 3]:  #3 , 4, 10
+for cntry in ["USA", "JPN"]:
+    for pfs in [10, 3, 4]:
         for adjust in [0, 1, 2]:
 
             key = (cntry, pfs, adjust)
@@ -96,8 +98,8 @@ for cntry in ["USA"]:  # , "JPN"
 ml_pred = {}
 ml_imp = {}
 
-for cntry in ["USA"]: #, "JPN"
-        for pfs in [10]: #, 4, 3
+for cntry in ["USA", "JPN"]:
+        for pfs in [10, 3, 4]:
             for adjust in [0, 1, 2]:
 
                 key = (cntry, pfs, adjust)
@@ -108,14 +110,15 @@ for cntry in ["USA"]: #, "JPN"
                     continue
 
                 ml_pred[key], ml_imp[key] = train_pred_model(
-                    data_path=DATA_DIR, excntry=cntry, pfs=pfs, adj=adjust, splits_idx=splits_idx[key], model= ["lasso", "lasso_cls"])
+                    data_path=DATA_DIR, excntry=cntry, pfs=pfs, adj=adjust,
+                    splits_idx=splits_idx[key], model= "all")
 
 #%% Global Evaluation
 ml_pred_gl = {}
 ml_imp_gl = {}
 
-for cntry in ["USA"]: #, "JPN"
-        for pfs in [10]: #, 4, 3
+for cntry in ["USA", "JPN"]:
+        for pfs in [10, 3, 4]:
             for adjust in [0, 1, 2]:
 
                 key = (cntry, pfs, adjust)
@@ -130,8 +133,8 @@ ml_pred_gl_w_comb = {}
 ml_imp_w_comb = {}
 ml_imp_gl_w_comb = {}
 
-for cntry in ["USA"]: #, "JPN"
-        for pfs in [10]: #, 4, 3
+for cntry in ["USA", "JPN"]:
+        for pfs in [10, 3, 4]:
             for adjust in [0, 1, 2]:
 
                 key = (cntry, pfs, adjust)
@@ -150,9 +153,9 @@ buck_ret_ts = {}
 buck_ret_per_mo = {}
 buck_ret_per_gl = {}
 
-for cntry in ["USA"]:
-     for pfs in [10]:
-         for n_buck in [10]:
+for cntry in ["USA", "JPN"]:
+     for pfs in [10, 3, 4]:
+         for n_buck in [10, 3, 4]:
                  for adjust in [0, 1, 2]:
                    
                    key = (cntry, pfs, n_buck, adjust)
@@ -170,9 +173,9 @@ regress_strat_gl = {}
 strat_turno = {}
 regress_buck_gl = {}
 
-for cntry in ["USA"]:
-    for pfs in [10]:
-        for n_buck in [10]:
+for cntry in ["USA", "JPN"]:
+    for pfs in [10, 3, 4]:
+        for n_buck in [10, 3, 4]:
             for adjust in [0, 1, 2]:
                 
                 key = (cntry, pfs, n_buck, adjust)
@@ -187,9 +190,9 @@ for cntry in ["USA"]:
 # Report Alphas and T stats for Crashes
 regress_strat_gl_crash = {}
 
-for cntry in ["USA"]:
-    for pfs in [10]:
-        for n_buck in [10]:
+for cntry in ["USA", "JPN"]:
+    for pfs in [10, 3, 4]:
+        for n_buck in [10, 3, 4]:
             for adjust in [0, 1, 2]:
 
                 key = (cntry, pfs, n_buck, adjust)
@@ -203,9 +206,9 @@ for cntry in ["USA"]:
 bt_metrics_gl = {}
 bt_month = {}
 
-for cntry in ["USA"]:
-    for pfs in [10]:
-        for n_buck in [10]:
+for cntry in ["USA", "JPN"]:
+    for pfs in [10, 3, 4]:
+        for n_buck in [10, 3, 4]:
             for adjust in [0, 1, 2]:
 
                 key = (cntry, pfs, n_buck, adjust)
@@ -218,9 +221,9 @@ for cntry in ["USA"]:
 
 plot_paths = {}
 
-for cntry in ["USA"]:
-    for pfs in [10]:
-        for n_buck in [10]:
+for cntry in ["USA", "JPN"]:
+    for pfs in [10, 3, 4]:
+        for n_buck in [10, 3, 4]:
             for adjust in [0, 1, 2]:
 
                 key = (cntry, pfs, n_buck, adjust)
@@ -229,7 +232,7 @@ for cntry in ["USA"]:
 
                 plot_paths[key] = plot_cumulative_performance(
                     data_path=DATA_DIR,base_path= BASE_DIR, excntry=cntry, pfs=pfs, n_buckets=n_buck,
-                    adj=adjust, save=True, show=True
+                    adj=adjust, save=True, show=False
                 )
 
 # %%

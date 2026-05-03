@@ -21,7 +21,7 @@ import statsmodels.api as sm
 import numpy as np
 
 # the 153 characteristics
-chars = [
+all_chars = [
     "age",
     "aliq_at",
     "aliq_mat",
@@ -275,7 +275,7 @@ def build_projection():
             "ff49",
             "excntry",
         ]
-            + chars
+            + all_chars
             )
 
     
@@ -393,7 +393,7 @@ def download_stock_characteristics(username, password, data_path):
         table="fivefactors_monthly")
 
 
-    countries = ['USA', 'JPN', 'BRA', 'CHN', 'GBR', 'DEU', 'IND']
+    countries = ['USA', 'JPN'] #, 'BRA', 'CHN', 'GBR', 'DEU', 'IND'
 
     year_country_dict = year_country_map(
         data_path = data_path,
@@ -521,6 +521,41 @@ char_info = (
     .select([pl.col("abr_jkp").alias("characteristics"), pl.col("direction").cast(pl.Int32)])
 )
 
+def pre_clean_jpn(data_path):
+
+    files = list((data_path / "stock_characteristics").glob(f"JPN_*.parquet"))
+    temp = []
+    for f in tqdm(files, desc="Processing files"):
+        
+        data = pl.read_parquet(f)
+        
+        exclude = ["id", "eom", "source_crsp", "size_grp", "excntry"]
+        data = data.with_columns([
+            (pl.col(i).cast(pl.Float64)) for i in data.columns if i not in exclude
+            ])
+        
+        temp.append(data)
+        
+    df = pl.concat(temp)
+    
+    min_available_share = 0.5
+
+    drop_cols = [
+        c for c in df.columns
+        if df.schema[c].is_float()
+        and df.select(
+            (~pl.col(c).is_nan() & pl.col(c).is_not_null()).mean()
+        ).item() < min_available_share
+    ]
+    keep_cols = [c for c in data.columns if c not in drop_cols]
+
+    out_dir = data_path / "stock_characteristics_clean"
+    out_dir.mkdir(exist_ok=True)
+    
+    for f in files:
+        data = pl.read_parquet(f)
+        data.select(keep_cols).write_parquet(out_dir / f.name)
+     
 def factor_returns(
         data_path,
         excntry,
@@ -529,14 +564,21 @@ def factor_returns(
         bp_min_n,
         pfs
         ):
-
-    files = list((data_path / "stock_characteristics").glob(f"{excntry}_*.parquet"))
+    
+    files = list(
+        (data_path / "stock_characteristics").glob(f"{excntry}_*.parquet")
+        if excntry == "USA"
+        else (data_path / "stock_characteristics_clean").glob(f"{excntry}_*.parquet")
+    )
 
     temp_files = []
+    temp_market_files = []
     
     for f in tqdm(files, desc="Processing files"):
         
         data = pl.read_parquet(f)
+        chars = [c for c in all_chars if c in data.columns]
+        
         
         exclude = ["id", "eom", "source_crsp", "size_grp", "excntry"]
         data = data.with_columns([
@@ -583,9 +625,9 @@ def factor_returns(
             ])
         )
 
-        market_partial.write_parquet(
-            data_path / "factor_returns" / f"temp_market_{f.stem}.parquet"
-        )
+        market_path = data_path / "factor_returns" / f"temp_market_{f.stem}.parquet"
+        market_partial.write_parquet(market_path)
+        temp_market_files.append(market_path)
 
         data = data.with_columns([
             pl.col(c).clip(
@@ -619,7 +661,7 @@ def factor_returns(
                 .otherwise(pl.col("cdf"))
                 .alias("cdf")
             )
-            # turn into 3 portfolios
+            # turn into n portfolios
             sub = sub.with_columns(
                 (pl.col("cdf")*pfs)
                 .ceil()
@@ -654,6 +696,7 @@ def factor_returns(
     pf_returns_total = pf_returns_total.with_columns(
         pl.lit(excntry).str.to_uppercase().alias("excntry"))
     
+        
     hml_returns = pf_returns_total.group_by(["eom", "characteristics", "excntry"]).agg(
         [# check if there are rows with missing long or short portfolios
         pl.col("pf").is_in([pfs, 1]).sum().alias("pfs"),
@@ -680,7 +723,7 @@ def factor_returns(
             (pl.col(var) * pl.col("direction")).alias(var) for var in resign_cols])
     
     market = (
-        pl.scan_parquet(data_path / "factor_returns" / "temp_market_*.parquet")
+        pl.scan_parquet(data_path / "factor_returns" / f"temp_market_{excntry}*.parquet")
         .group_by("eom")
         .agg([
             pl.col("sum_ret_x_me").sum(),
@@ -704,6 +747,9 @@ def factor_returns(
     market.sink_parquet(
         data_path / "factor_returns" / f"{excntry}_market_returns.parquet")
     
+    for temp_file in temp_files + temp_market_files: 
+        temp_file.unlink(missing_ok=True)
+
     return  lms_returns
 
 
@@ -798,6 +844,8 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
             for t in range(1, 61)
         ])
 
+        max_t = 10 if excntry == "JPN" else 21
+
         df = df.with_columns(
             (
                 ((1 + pl.col(base_ret).shift(t*12 + 1)).log())
@@ -805,7 +853,7 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
                 .over("characteristics")
                 .exp() - 1
             ).alias(f"ret_y_{t}")
-            for t in range(6, 21)
+            for t in range(6, max_t)
         )
 
         df = df.with_columns(
@@ -881,7 +929,9 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
             ).alias("beta_full"))
         ).drop("n")
 
-        spreads = lms_returns.select(["eom", "characteristics"] + [f"spread_{c}" for c in chars])
+        spread_cols = [c for c in lms_returns.columns if c.startswith("spread_")]
+
+        spreads = lms_returns.select(["eom", "characteristics"] + spread_cols)
 
         df = df.join(spreads, on=["eom", "characteristics"], how="left")
 
@@ -895,6 +945,7 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
                 ).alias(c)
                 for c in feature_clip_cols
                 ])
+        
         
         to_clean_cols = [
             c for c in df.columns
@@ -971,6 +1022,11 @@ def build_train_val_test_idx(data_path, pfs, adj, excntry, min_train_val, val, t
         train_months = unique_eom.iloc[train_months_idx]
         val_months = unique_eom.iloc[val_months_idx]
         test_months = unique_eom.iloc[test_months_idx]
+
+        print(f"Train: {train_months.min()} to {train_months.max()} | {len(train_months)} months")
+        print(f"Val:   {val_months.min()} to {val_months.max()} | {len(val_months)} months")
+        print(f"Test:  {test_months.min()} to {test_months.max()} | {len(test_months)} months")
+
 
         train_rows = meta.loc[meta["eom"].isin(train_months), "row_id"].values
         val_rows = meta.loc[meta["eom"].isin(val_months), "row_id"].values
@@ -1092,7 +1148,7 @@ def predict_with_pls(X_train, y_train,
     param_dist = {"n_components": list(range(1, 15))}
     
     best_params = tune_model_with_val(
-        PLSRegression(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=1)
+        PLSRegression(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=30)
     
     print(f"PLS best params: {best_params}")
 
@@ -1115,13 +1171,11 @@ def predict_with_lasso(X_train,y_train,
                        X_test, y_test,
                        y_pred_split, y_true_split):
 
-    
-    #param_dist = {"alpha": np.logspace(-3, np.log10(0.002), 100)}
 
     param_dist = {"alpha": np.logspace(-5, 0, 150)}
 
     best_params = tune_model_with_val(
-            Lasso(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=1)
+            Lasso(max_iter=5000), param_dist, X_train, y_train, X_val, y_val, n_iter=30)
     print(f"Lasso best params: {best_params}")
 
     best_model = Lasso(max_iter=5000, **best_params)
@@ -1157,8 +1211,6 @@ def predict_with_lasso_cls(
         X_test, y_test,
         y_pred_split, y_true_split, y_prob_split):
 
-    #param_dist = {"C": np.logspace(-3, 2, 50)}
-
     param_dist = {"C": np.logspace(-4, 4, 150)}
 
 
@@ -1170,7 +1222,7 @@ def predict_with_lasso_cls(
         y_train,
         X_val,
         y_val,
-        n_iter=1
+        n_iter=30
     )
 
     print(f"LASSO_CLS best params: {best_params}")
@@ -1208,14 +1260,12 @@ def predict_with_lasso_cls(
 
 def predict_with_enet(X_train, y_train, X_val, y_val, X_train_val, y_train_val, X_test, y_test,
                       y_pred_split, y_true_split):
-                      
-    #param_dist = {"alpha": np.logspace(-3, np.log10(0.004), 50)}
 
     param_dist = {"alpha": np.logspace(-5, 0, 150)}
 
     best_params = tune_model_with_val(
             ElasticNet(max_iter=5000, l1_ratio=0.5),
-            param_dist, X_train, y_train, X_val, y_val, n_iter=1)
+            param_dist, X_train, y_train, X_val, y_val, n_iter=30)
 
     print(f"ENET best params: {best_params}")
 
@@ -1252,8 +1302,6 @@ def predict_with_enet_cls(
         X_test, y_test,
         y_pred_split, y_true_split, y_prob_split):
 
-    #param_dist = {"C": np.logspace(-3, 2, 50)}
-
     param_dist = {"C": np.logspace(-4, 4, 150), "l1_ratio": [0.25, 0.5, 0.75]}
 
     best_params = tune_classifier_with_val(
@@ -1267,7 +1315,7 @@ def predict_with_enet_cls(
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=1
+        n_iter=30
     )
 
     print(f"ENET_CLS best params: {best_params}")
@@ -1318,7 +1366,7 @@ def predict_with_rf(X_train, y_train, X_val, y_val, X_train_val, y_train_val,
 
     best_params = tune_model_with_val(
         RandomForestRegressor(random_state=42, n_jobs=-1),
-        param_dist, X_train, y_train, X_val, y_val, n_iter=1)
+        param_dist, X_train, y_train, X_val, y_val, n_iter=30)
 
     print(f"RF best params: {best_params}")
 
@@ -1354,7 +1402,7 @@ def predict_with_rf_cls(
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=1
+        n_iter=30
     )
 
     print(f"RF_CLS best params: {best_params}")
@@ -1396,7 +1444,7 @@ def predict_with_gbrt(
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=1
+        n_iter=30
         
     )
     print(f"GBRT best params: {best_params}")
@@ -1433,7 +1481,7 @@ def predict_with_gbrt_cls(
         param_dist,
         X_train, y_train,
         X_val, y_val,
-        n_iter=1
+        n_iter=30
     )
 
     print(f"GBRT-cls best params: {best_params}")
@@ -1471,7 +1519,8 @@ def predict_with_xgb(
                 for colsample in [0.7, 0.9]:
                     for reg_lambda in [1, 5]:
                         for min_child_weight in [1, 5]:
-                            
+
+
                             model = XGBRegressor(
                                 learning_rate=lr,
                                 n_estimators=1000,
@@ -1555,6 +1604,7 @@ def predict_with_xgb_cls(
                 for colsample in [0.7, 0.9]:
                     for reg_lambda in [1, 5]:
                         for min_child_weight in [1, 5]:
+
 
                             model = XGBClassifier(
                                 learning_rate=lr,
@@ -1753,13 +1803,24 @@ def save_train_pred_outputs(data_path, excntry, pfs, adj,
         else:
             out["probability"] = np.full(len(y_pred_all), np.nan)
 
-        pred_lst.append(pl.DataFrame(out))
+        pred_lst.append(
+        pl.DataFrame(out).with_columns([
+            pl.col("prediction").cast(pl.Float64),
+            pl.col("actual").cast(pl.Float64),
+            pl.col("probability").cast(pl.Float64),
+        ])
+    )
 
     df_pred = pl.concat(pred_lst, how="diagonal")
     df_pred = df_pred.join(y_ret, on="row_id", how="left")
     
     if pred_path.exists():
-        existing = pl.read_parquet(pred_path)
+
+        existing = pl.read_parquet(pred_path).with_columns([
+            pl.col("prediction").cast(pl.Float64),
+            pl.col("actual").cast(pl.Float64),
+            pl.col("probability").cast(pl.Float64)])
+        
         df_pred = pl.concat([existing, df_pred], how="diagonal")
         df_pred = df_pred.unique(subset=["row_id", "model", "country", "pfs"], keep="last")
 
@@ -1801,7 +1862,7 @@ def save_vi_output(data_path, excntry, pfs, adj, vi_split, test_idx_split, featu
                     "importance": vi_arr,
                     "country": excntry,
                     "pfs": pfs
-                })
+                }).with_columns([pl.col("importance").cast(pl.Float64)])
             )
 
     df_vi = pl.concat(vi_lst, how="diagonal")
@@ -1826,7 +1887,10 @@ def save_vi_output(data_path, excntry, pfs, adj, vi_split, test_idx_split, featu
     )
 
     if vi_path.exists():
-        existing = pl.read_parquet(vi_path)
+        
+        existing = pl.read_parquet(vi_path).with_columns(
+            [pl.col("importance").cast(pl.Float64)])
+
         df_vi = pl.concat([existing, df_vi], how="diagonal")
         df_vi = df_vi.unique(subset=["test_start", "model", "feature", "country", "pfs"], keep="last")
 
@@ -2340,6 +2404,7 @@ def add_comb_model(excntry, pfs, data_path, adj):
                 pl.when(pl.col("probability") > 0.5)
                 .then(1)
                 .otherwise(-1)
+                .cast(pl.Float64)
                 .alias("prediction"),
                 pl.lit("COMB").alias("model")
             ])
