@@ -21,7 +21,7 @@ import statsmodels.api as sm
 import numpy as np
 
 # the 153 characteristics
-all_chars = [
+chars = [
     "age",
     "aliq_at",
     "aliq_mat",
@@ -275,7 +275,7 @@ def build_projection():
             "ff49",
             "excntry",
         ]
-            + all_chars
+            + chars
             )
 
     
@@ -393,7 +393,7 @@ def download_stock_characteristics(username, password, data_path):
         table="fivefactors_monthly")
 
 
-    countries = ['USA', 'JPN'] #, 'BRA', 'CHN', 'GBR', 'DEU', 'IND'
+    countries = ['USA'] #, 'JPN', 'BRA', 'CHN', 'GBR', 'DEU', 'IND'
 
     year_country_dict = year_country_map(
         data_path = data_path,
@@ -521,40 +521,40 @@ char_info = (
     .select([pl.col("abr_jkp").alias("characteristics"), pl.col("direction").cast(pl.Int32)])
 )
 
-def pre_clean_jpn(data_path):
+# def pre_clean_jpn(data_path):
 
-    files = list((data_path / "stock_characteristics").glob(f"JPN_*.parquet"))
-    temp = []
-    for f in tqdm(files, desc="Processing files"):
+#     files = list((data_path / "stock_characteristics").glob(f"JPN_*.parquet"))
+#     temp = []
+#     for f in tqdm(files, desc="Processing files"):
         
-        data = pl.read_parquet(f)
+#         data = pl.read_parquet(f)
         
-        exclude = ["id", "eom", "source_crsp", "size_grp", "excntry"]
-        data = data.with_columns([
-            (pl.col(i).cast(pl.Float64)) for i in data.columns if i not in exclude
-            ])
+#         exclude = ["id", "eom", "source_crsp", "size_grp", "excntry"]
+#         data = data.with_columns([
+#             (pl.col(i).cast(pl.Float64)) for i in data.columns if i not in exclude
+#             ])
         
-        temp.append(data)
+#         temp.append(data)
         
-    df = pl.concat(temp)
+#     df = pl.concat(temp)
     
-    min_available_share = 0.5
+#     min_available_share = 0.5
 
-    drop_cols = [
-        c for c in df.columns
-        if df.schema[c].is_float()
-        and df.select(
-            (~pl.col(c).is_nan() & pl.col(c).is_not_null()).mean()
-        ).item() < min_available_share
-    ]
-    keep_cols = [c for c in data.columns if c not in drop_cols]
+#     drop_cols = [
+#         c for c in df.columns
+#         if df.schema[c].is_float()
+#         and df.select(
+#             (~pl.col(c).is_nan() & pl.col(c).is_not_null()).mean()
+#         ).item() < min_available_share
+#     ]
+#     keep_cols = [c for c in data.columns if c not in drop_cols]
 
-    out_dir = data_path / "stock_characteristics_clean"
-    out_dir.mkdir(exist_ok=True)
+#     out_dir = data_path / "stock_characteristics_clean"
+#     out_dir.mkdir(exist_ok=True)
     
-    for f in files:
-        data = pl.read_parquet(f)
-        data.select(keep_cols).write_parquet(out_dir / f.name)
+#     for f in files:
+#         data = pl.read_parquet(f)
+#         data.select(keep_cols).write_parquet(out_dir / f.name)
      
 def factor_returns(
         data_path,
@@ -565,11 +565,7 @@ def factor_returns(
         pfs
         ):
     
-    files = list(
-        (data_path / "stock_characteristics").glob(f"{excntry}_*.parquet")
-        if excntry == "USA"
-        else (data_path / "stock_characteristics_clean").glob(f"{excntry}_*.parquet")
-    )
+    files = list((data_path / "stock_characteristics").glob(f"{excntry}_*.parquet"))
 
     temp_files = []
     temp_market_files = []
@@ -577,9 +573,7 @@ def factor_returns(
     for f in tqdm(files, desc="Processing files"):
         
         data = pl.read_parquet(f)
-        chars = [c for c in all_chars if c in data.columns]
-        
-        
+                
         exclude = ["id", "eom", "source_crsp", "size_grp", "excntry"]
         data = data.with_columns([
             (pl.col(i).cast(pl.Float64)) for i in data.columns if i not in exclude
@@ -822,6 +816,23 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
             out_y = data_path / "factor_characteristics" / f"{excntry}_{pfs}_target_class.parquet"
             meta_out = data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta_class.parquet"
 
+        elif adj == 3:
+
+            base_ret =  "ret_exc_lead1m_vw_cap"
+
+            cols_to_drop = [
+                base_ret,
+                "target_rank",
+                "excntry",
+                "characteristics",
+                "eom",
+                "market_ret_exc_vw_cap"
+            ]
+
+            out_X = data_path / "factor_characteristics" / f"{excntry}_{pfs}_feature_rank.parquet"
+            out_y = data_path / "factor_characteristics" / f"{excntry}_{pfs}_target_rank.parquet"
+            meta_out = data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta_rank.parquet"
+
         else:
             base_ret = "ret_exc_lead1m_vw_cap"
             cols_to_drop = [base_ret, 
@@ -952,7 +963,7 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
             if c.startswith(("ret_m_", "ret_y_", "vol_m_", "beta_", "spread_"))
         ]
 
-        target_clean_col = "target_class" if adj == 2 else base_ret
+        target_clean_col = ("target_class" if adj == 2 else base_ret)
 
         df = df.filter(
             pl.col(target_clean_col).is_not_null() &
@@ -961,6 +972,12 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
                 for c in to_clean_cols
             ])
         )
+
+        if adj == 3:
+            df = df.with_columns((
+                pl.col("ret_exc_lead1m_vw_cap")
+                .rank(method="average").over("eom")/ pl.len().over("eom")
+                ).alias("target_rank"))
                 
         df = df.sort(["eom", "characteristics"])
 
@@ -974,6 +991,8 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
              y = df.select(["row_id", base_ret, "ret_exc_lead1m_vw_cap"]).sort("row_id")
         elif adj == 2:
             y = df.select(["row_id", base_ret, "target_class", "ret_exc_lead1m_vw_cap"]).sort("row_id")
+        elif adj == 3:
+            y = df.select(["row_id", base_ret, "target_rank"]).sort("row_id")
         else:
             y = df.select(["row_id", base_ret]).sort("row_id")
 
@@ -988,6 +1007,8 @@ def get_suffix(adj):
         return "_cross"
     elif adj == 2:
         return "_class"
+    elif adj == 3:
+        return "_rank"
     else:
         return ""
 
@@ -1907,6 +1928,9 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model, adj):
     elif adj == 2:
         suffix = "_class"
         target_col = "target_class"
+    elif adj == 3:
+        suffix = "_rank"
+        target_col = "target_rank"
     else:
         suffix = ""
         target_col = "ret_exc_lead1m_vw_cap"
@@ -1924,6 +1948,12 @@ def train_pred_model(data_path, excntry, pfs, splits_idx, model, adj):
                 "ret_exc_cross_lead1m_vw_cap": "ret_cross"
             })
             .select(["row_id", "ret_raw", "ret_cross"]))
+        
+    elif adj == 3:
+        y_ret = (
+            pl.read_parquet(y_path)
+            .rename({"ret_exc_lead1m_vw_cap": "ret_raw"})
+            .select(["row_id", "ret_raw"]))
     else:
         y_ret = (
             pl.read_parquet(y_path)

@@ -40,11 +40,11 @@ nyse_cutoffs = pl.read_parquet(DATA_DIR/"other_input"/"nyse_cutoffs.parquet")
 ret_cutoffs = pl.read_parquet(DATA_DIR/"other_input"/"return_cutoffs.parquet")
 ret_cutoffs = ret_cutoffs.with_columns((pl.col("eom").dt.month_start().dt.offset_by("-1d")).alias("eom_lag1"))
 #%% 
-pre_clean_jpn(data_path=DATA_DIR)
+# pre_clean_jpn(data_path=DATA_DIR)
 #%%
 # Create stock level portfolios
 lms_ret = {}
-for ex in ["USA", "JPN"]:
+for ex in ["USA"]:
     for pfs in [10, 3, 4]:
 
         key = (ex, pfs)
@@ -56,9 +56,9 @@ for ex in ["USA", "JPN"]:
 feature = {}
 target = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
     for pfs in [10, 3, 4]:
-        for adjust in [0, 1, 2]:
+        for adjust in [0, 1, 2, 3]:
 
             key = (cntry, pfs, adjust)
 
@@ -71,9 +71,9 @@ for cntry in ["USA", "JPN"]:
 # Define train, val and test periods
 splits_idx = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
     for pfs in [10, 3, 4]:
-        for adjust in [0, 1, 2]:
+        for adjust in [0, 1, 2, 3]:
 
             key = (cntry, pfs, adjust)
 
@@ -98,9 +98,9 @@ for cntry in ["USA", "JPN"]:
 ml_pred = {}
 ml_imp = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
         for pfs in [10, 3, 4]:
-            for adjust in [0, 1, 2]:
+            for adjust in [0, 1, 2, 3]:
 
                 key = (cntry, pfs, adjust)
             
@@ -117,9 +117,9 @@ for cntry in ["USA", "JPN"]:
 ml_pred_gl = {}
 ml_imp_gl = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
         for pfs in [10, 3, 4]:
-            for adjust in [0, 1, 2]:
+            for adjust in [0, 1, 2, 3]:
 
                 key = (cntry, pfs, adjust)
 
@@ -133,9 +133,9 @@ ml_pred_gl_w_comb = {}
 ml_imp_w_comb = {}
 ml_imp_gl_w_comb = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
         for pfs in [10, 3, 4]:
-            for adjust in [0, 1, 2]:
+            for adjust in [0, 1, 2, 3]:
 
                 key = (cntry, pfs, adjust)
             
@@ -153,10 +153,10 @@ buck_ret_ts = {}
 buck_ret_per_mo = {}
 buck_ret_per_gl = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
      for pfs in [10, 3, 4]:
          for n_buck in [10, 3, 4]:
-                 for adjust in [0, 1, 2]:
+                 for adjust in [0, 1, 2, 3]:
                    
                    key = (cntry, pfs, n_buck, adjust)
 
@@ -173,10 +173,10 @@ regress_strat_gl = {}
 strat_turno = {}
 regress_buck_gl = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
     for pfs in [10, 3, 4]:
         for n_buck in [10, 3, 4]:
-            for adjust in [0, 1, 2]:
+            for adjust in [0, 1, 2, 3]:
                 
                 key = (cntry, pfs, n_buck, adjust)
 
@@ -190,10 +190,10 @@ for cntry in ["USA", "JPN"]:
 # Report Alphas and T stats for Crashes
 regress_strat_gl_crash = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
     for pfs in [10, 3, 4]:
         for n_buck in [10, 3, 4]:
-            for adjust in [0, 1, 2]:
+            for adjust in [0, 1, 2, 3]:
 
                 key = (cntry, pfs, n_buck, adjust)
 
@@ -206,10 +206,10 @@ for cntry in ["USA", "JPN"]:
 bt_metrics_gl = {}
 bt_month = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
     for pfs in [10, 3, 4]:
         for n_buck in [10, 3, 4]:
-            for adjust in [0, 1, 2]:
+            for adjust in [0, 1, 2, 3]:
 
                 key = (cntry, pfs, n_buck, adjust)
 
@@ -221,10 +221,10 @@ for cntry in ["USA", "JPN"]:
 
 plot_paths = {}
 
-for cntry in ["USA", "JPN"]:
+for cntry in ["USA"]:
     for pfs in [10, 3, 4]:
         for n_buck in [10, 3, 4]:
-            for adjust in [0, 1, 2]:
+            for adjust in [0, 1, 2, 3]:
 
                 key = (cntry, pfs, n_buck, adjust)
 
