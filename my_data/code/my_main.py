@@ -7,7 +7,6 @@ import os
 from my_wrds_credentials import get_wrds_credentials
 
 from my_aux_functions import(
-    pre_clean_jpn,
     setup_folder_structure,
     download_stock_characteristics,
     nyse_size_cutoffs,
@@ -22,7 +21,10 @@ from my_aux_functions import(
     eval_strategy_returns,
     eval_strategy_returns_period,
     compute_backtest_metrics,
-    plot_cumulative_performance)
+    plot_cumulative_performance,
+    latex_pred_perf,
+    latex_strat_perf,
+    latex_strat_alphas)
 
 BASE_DIR = Path.home()/"Desktop"/"Master_Thesis"/"my_data"
 CODE_DIR = BASE_DIR / "code"
@@ -135,7 +137,7 @@ ml_imp_gl_w_comb = {}
 
 for cntry in ["USA"]:
         for pfs in [10, 3, 4]:
-            for adjust in [0, 1, 2, 3]:
+            for adjust in [0, 1, 2]: #, 3
 
                 key = (cntry, pfs, adjust)
             
@@ -154,9 +156,9 @@ buck_ret_per_mo = {}
 buck_ret_per_gl = {}
 
 for cntry in ["USA"]:
-     for pfs in [10, 3, 4]:
-         for n_buck in [10, 3, 4]:
-                 for adjust in [0, 1, 2, 3]:
+     for pfs in [10]:#, 3, 4
+         for n_buck in [10]: #, 3, 4
+                 for adjust in [0, 1, 2]:#, 3
                    
                    key = (cntry, pfs, n_buck, adjust)
 
@@ -174,9 +176,9 @@ strat_turno = {}
 regress_buck_gl = {}
 
 for cntry in ["USA"]:
-    for pfs in [10, 3, 4]:
-        for n_buck in [10, 3, 4]:
-            for adjust in [0, 1, 2, 3]:
+    for pfs in [10]:#, 3, 4
+        for n_buck in [10]: #, 3, 4
+            for adjust in [0, 1, 2]: #, 3
                 
                 key = (cntry, pfs, n_buck, adjust)
 
@@ -235,4 +237,58 @@ for cntry in ["USA"]:
                     adj=adjust, save=True, show=False
                 )
 
+# %% Predictive Performance for the Cross Section of Factor Returns
+print(latex_pred_perf(
+        dfs=[
+            ml_pred_gl_w_comb["USA", 10, 0],
+            ml_pred_gl_w_comb["USA", 10, 1],
+            ml_pred_gl_w_comb["USA", 10, 2],
+            #ml_pred_gl_w_comb["USA", 10, 3],
+        ],
+        adjs=[0, 1, 2], #3
+        panel_titles=[
+            "Benchmark",
+            "Cross-Reg",
+            "Cross-Class",
+            #"Rank-Reg",
+        ],
+    )
+)
+
+# %%
+print(
+    latex_strat_perf(
+        dfs=[
+            buck_ret_avg_gl["USA", 10, 10, 0],
+            buck_ret_avg_gl["USA", 10, 10, 1],
+            buck_ret_avg_gl["USA", 10, 10, 2],
+            #buck_ret_avg_gl["USA", 10, 10, 3],
+        ],
+        adjs=[0, 1, 2], #, 3
+        panel_titles=[
+            "Benchmark",
+            "Cross-Reg",
+            "Cross-Class",
+            #"Rank-Reg",
+        ]
+    )
+)
+# %%
+print(
+    latex_strat_alphas(
+        dfs=[
+            regress_strat_gl["USA", 10, 10, 0],
+            regress_strat_gl["USA", 10, 10, 1],
+            regress_strat_gl["USA", 10, 10, 2],
+            #regress_strat_gl["USA", 10, 10, 3],
+        ],
+        adjs=[0, 1, 2], #, 3
+        panel_titles=[
+            "Benchmark",
+            "Cross-Reg",
+            "Cross-Class",
+            #"Rank-Reg",
+        ]
+    )
+)
 # %%

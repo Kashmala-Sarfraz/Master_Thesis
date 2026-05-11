@@ -855,8 +855,6 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
             for t in range(1, 61)
         ])
 
-        max_t = 10 if excntry == "JPN" else 21
-
         df = df.with_columns(
             (
                 ((1 + pl.col(base_ret).shift(t*12 + 1)).log())
@@ -864,7 +862,7 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
                 .over("characteristics")
                 .exp() - 1
             ).alias(f"ret_y_{t}")
-            for t in range(6, max_t)
+            for t in range(6, 21)
         )
 
         df = df.with_columns(
@@ -974,11 +972,15 @@ def build_factor_characteristics(data_path, pfs, excntry, adj):
         )
 
         if adj == 3:
-            df = df.with_columns((
-                pl.col("ret_exc_lead1m_vw_cap")
-                .rank(method="average").over("eom")/ pl.len().over("eom")
-                ).alias("target_rank"))
-                
+            df = df.with_columns(
+                (
+                    2 * (
+                        (pl.col("ret_exc_lead1m_vw_cap").rank(method="average").over("eom") - 1)
+                        / (pl.len().over("eom") - 1)
+                    ) - 1
+                ).alias("target_rank")
+            )
+                        
         df = df.sort(["eom", "characteristics"])
 
         df = df.with_columns(pl.arange(0, pl.len()).alias("row_id"))
@@ -3441,3 +3443,484 @@ def plot_cumulative_performance(
             plt.close(fig)
 
     return out_paths
+
+def latex_pred_perf(
+    dfs,
+    adjs,
+    panel_titles,
+    caption: str = "Predictive Performance for the Cross Section of Factor Returns",
+    label: str = "tab:pred-perf-panels"):
+
+    model_order = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB", "COMB"]
+
+    header_labels = {
+        "OLS": "Linear",
+        "PLS": "PLS",
+        "LASSO": "LASSO",
+        "ENET": "ENET",
+        "RF": "RF",
+        "GBRT": "GBRT",
+        "XGB": "XGB",
+        "COMB": "COMB",
+    }
+    score_labels = {
+        "r2": r"$R^2_{\mathrm{oos}}$",
+        "balanced_accuracy": r"$BACC_{\mathrm{oos}}$",
+        "spearman": r"$\bar{\rho}_s$",
+        "pearson": r"$\bar{\rho}_p$",
+    }
+
+    notes = (
+        r"Table notes. The table reports average out-of-sample predictive performance for 153 factor returns "
+        r"from October 1986 to September 2024. Performance metrics are averaged over all test observations, "
+        r"Four targets are evaluated: next-month value-weighted excess factor returns (Benchmark), "
+        r"cross-sectionally demeaned next-month returns (Cross-Reg), a binary outperformer indicator "
+        r"based on demeaned returns (Cross-Class), and each factor's within-month percentile rank (Rank-Reg). "
+        r"$R^2_{\mathrm{oos}}$ and balanced accuracy are reported in percent. "
+        r"$\bar{\rho}_s$ and $\bar{\rho}_p$ are averages of monthly Spearman and Pearson "
+        r"cross-sectional correlations. For regression targets, correlations compare "
+        r"predicted and realized target returns. For the classification target, correlations "
+        r"compare predicted outperformance probabilities with realized demeaned returns. "
+        r"COMB is the equal-weighted average forecast across available models; for "
+        r"classification, it averages predicted probabilities."
+    )
+    def build_panel_rows(df, adj):
+        score = "balanced_accuracy" if adj == 2 else "r2"
+        score_order = [score, "spearman", "pearson"]
+
+        df = df.clone()
+
+        if adj == 2:
+            df = df.with_columns(
+                pl.col("model")
+                .str.replace("_CLS$", "")
+                .str.replace("^LOGIT$", "OLS")
+                .alias("model")
+            )
+
+        score_order_existing = [s for s in score_order if s in df.columns]
+
+        df_small = df.select(["model"] + score_order_existing)
+
+        long_df = df_small.unpivot(
+            index="model",
+            variable_name="score",
+            value_name="value",
+        )
+
+        long_df = long_df.with_columns(
+            pl.when(pl.col("value").is_null())
+            .then(pl.lit("-"))
+            .otherwise(
+                pl.struct(["value", "score"]).map_elements(
+                    lambda s: (
+                        f"{float(s['value']) * 100:.3f}"
+                        if s["score"] in {"r2", "balanced_accuracy"}
+                        else f"{float(s['value']):.3f}"
+                    ),
+                    return_dtype=pl.Utf8,
+                )
+            )
+            .alias("value_fmt")
+        )
+
+        wide_df = (
+            long_df
+            .select(["score", "model", "value_fmt"])
+            .pivot(
+                index="score",
+                columns="model",
+                values="value_fmt",
+                aggregate_function="first",
+            )
+        )
+
+        wide_df = (
+            wide_df
+            .with_columns(
+                pl.col("score")
+                .replace({s: i for i, s in enumerate(score_order_existing)})
+                .cast(pl.Int64)
+                .alias("_score_order")
+            )
+            .sort("_score_order")
+            .drop("_score_order")
+        )
+
+        for model in model_order:
+            if model not in wide_df.columns:
+                wide_df = wide_df.with_columns(pl.lit("-").alias(model))
+
+        wide_df = wide_df.select(["score"] + model_order)
+
+        wide_df = wide_df.with_columns(
+            pl.col("score").replace(score_labels).alias("score")
+        )
+
+        rows = []
+
+        for row in wide_df.iter_rows(named=True):
+            score_name = row["score"]
+            values = [row.get(model, "-") or "-" for model in model_order]
+            rows.append(score_name + " & " + " & ".join(values) + r" \\")
+
+        return rows
+
+    col_spec = "C{2cm} " + " ".join(["Z"] * len(model_order))
+    n_cols = 1 + len(model_order)
+
+    lines = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        rf"\caption{{{caption}}}",
+        rf"\label{{{label}}}",
+        r"\scriptsize",
+        r"\renewcommand{\arraystretch}{1.2}",
+        rf"\begin{{tabularx}}{{\textwidth}}{{{col_spec}}}",
+        r"\toprule",
+        " & " + " & ".join(
+            rf"\textbf{{{header_labels[model]}}}" for model in model_order
+        ) + r" \\",
+        r"\midrule",
+    ]
+
+    for i, (df, adj, title) in enumerate(zip(dfs, adjs, panel_titles)):
+        if i > 0:
+            lines.append(r"\addlinespace[0.4em]")
+            lines.append(r"\midrule")
+
+        lines.append(
+            rf"\multicolumn{{{n_cols}}}{{l}}{{\textbf{{{title}}}}} \\"
+        )
+
+        lines.extend(build_panel_rows(df, adj))
+
+    lines.extend([
+        r"\bottomrule",
+        "",
+        r"\addlinespace[0.3em]",
+        rf"\multicolumn{{{n_cols}}}{{p{{\dimexpr\textwidth-2\tabcolsep\relax}}}}{{",
+        r"\scriptsize",
+        rf"\textbf{{Notes:}} {notes}}}\\",
+        "",
+        r"\end{tabularx}",
+        "",
+        r"\end{table}",
+    ])
+
+    return "\n".join(lines)
+
+def latex_strat_perf(
+    dfs,
+    adjs,
+    panel_titles,
+    caption: str = "Returns on Machine Learning Factor Portfolios",
+    label: str = "tab:bucket-returns-panels",
+    scale: float = 100.0,
+    decimals: int = 2,
+):
+
+    model_order = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB", "COMB", "ORACLE"]
+
+    header_labels = {
+        "OLS": "Linear",
+        "PLS": "PLS",
+        "LASSO": "LASSO",
+        "ENET": "ENET",
+        "RF": "RF",
+        "GBRT": "GBRT",
+        "XGB": "XGB",
+        "COMB": "COMB",
+        "ORACLE": "ORACLE",
+    }
+
+    notes = (
+        r"The table reports average realized returns for forecast-sorted factor portfolios "
+        r"using 153 factor returns from October 1986 to September 2024. Each month, factors are "
+        r"sorted by the model forecast. Low contains factors with the lowest predicted next-month "
+        r"values; High contains factors with the highest predicted values. The intermediate rows "
+        r"report average realized returns for the corresponding forecast-sorted portfolios. "
+        r"High--Low reports the average return difference between the High and Low portfolios. "
+        r"Returns are in percent. COMB is the equal-weighted average forecast across available models. "
+        r"For classification, it averages predicted probabilities. "
+        r"ORACLE is a perfect-foresight benchmark: it sorts factors on actual next-month returns, "
+        r"so it gives an ex-post upper bound and is not implementable."
+    )
+    def build_panel_rows(df, adj):
+        df = df.clone()
+
+        if adj == 2:
+            df = df.with_columns(
+                pl.col("model")
+                .str.replace("_CLS$", "")
+                .str.replace("^LOGIT$", "OLS")
+                .alias("model")
+            )
+
+        n_buckets = int(df.select(pl.col("bucket").max()).item())
+
+        bucket_labels = {
+            1: "Low",
+            n_buckets: "High",
+        }
+
+        df_bucket = df.with_columns(
+            pl.col("bucket")
+            .map_elements(
+                lambda x: bucket_labels.get(int(x), str(int(x))),
+                return_dtype=pl.Utf8,
+            )
+            .alias("bucket_label"),
+            pl.col("bucket").cast(pl.Int64).alias("_bucket_order"),
+            pl.col("mean_ret_bucket_global")
+            .map_elements(
+                lambda x: f"{float(x) * scale:.{decimals}f}",
+                return_dtype=pl.Utf8,
+            )
+            .alias("value_fmt"),
+        )
+
+        wide_df = (
+            df_bucket
+            .select(["bucket_label", "_bucket_order", "model", "value_fmt"])
+            .pivot(
+                index=["bucket_label", "_bucket_order"],
+                columns="model",
+                values="value_fmt",
+                aggregate_function="first",
+            )
+            .sort("_bucket_order")
+            .drop("_bucket_order")
+            .rename({"bucket_label": "bucket"})
+        )
+
+        hml_df = (
+            df
+            .group_by("model")
+            .agg(pl.col("hml_ret_global").first().alias("hml_ret_global"))
+            .with_columns(
+                pl.lit("High-Low").alias("bucket"),
+                pl.col("hml_ret_global")
+                .map_elements(
+                    lambda x: f"{float(x) * scale:.{decimals}f}",
+                    return_dtype=pl.Utf8,
+                )
+                .alias("value_fmt"),
+            )
+            .select(["bucket", "model", "value_fmt"])
+            .pivot(
+                index="bucket",
+                columns="model",
+                values="value_fmt",
+                aggregate_function="first",
+            )
+        )
+
+        for model in model_order:
+            if model not in wide_df.columns:
+                wide_df = wide_df.with_columns(pl.lit("-").alias(model))
+
+            if model not in hml_df.columns:
+                hml_df = hml_df.with_columns(pl.lit("-").alias(model))
+
+        wide_df = wide_df.select(["bucket"] + model_order)
+        hml_df = hml_df.select(["bucket"] + model_order)
+
+        rows = []
+
+        for row in wide_df.iter_rows(named=True):
+            bucket = row["bucket"]
+            values = [row.get(model, "-") or "-" for model in model_order]
+            rows.append(bucket + " & " + " & ".join(values) + r" \\")
+
+        rows.append(r"\midrule")
+
+        for row in hml_df.iter_rows(named=True):
+            bucket = row["bucket"]
+            values = [row.get(model, "-") or "-" for model in model_order]
+            rows.append(bucket + " & " + " & ".join(values) + r" \\")
+
+        return rows
+
+    col_spec = "C{1.5cm} " + " ".join(["Z"] * len(model_order))
+    n_cols = 1 + len(model_order)
+
+    lines = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        rf"\caption{{{caption}}}",
+        rf"\label{{{label}}}",
+        r"\scriptsize",
+        r"\renewcommand{\arraystretch}{1.2}"
+        rf"\begin{{tabularx}}{{\textwidth}}{{{col_spec}}}",
+        r"\toprule",
+        " & " + " & ".join(
+            rf"\textbf{{{header_labels[model]}}}" for model in model_order
+        ) + r" \\",
+        r"\midrule",
+    ]
+
+    for i, (df, adj, title) in enumerate(zip(dfs, adjs, panel_titles)):
+        if i > 0:
+            lines.append(r"\addlinespace[0.4em]")
+
+        lines.append(
+            rf"\multicolumn{{{n_cols}}}{{l}}{{\textbf{{{title}}}}} \\"
+        )
+
+        lines.extend(build_panel_rows(df, adj))
+
+    lines.extend([
+        r"\bottomrule",
+        "",
+        r"\addlinespace[0.3em]",
+        rf"\multicolumn{{{n_cols}}}{{p{{\dimexpr\textwidth-2\tabcolsep\relax}}}}{{",
+        r"\scriptsize",
+        rf"\textbf{{Notes:}} {notes}}}\\",
+        "",
+        r"\end{tabularx}",
+        "",
+        r"\end{table}",
+    ])
+
+    return "\n".join(lines)
+
+
+import polars as pl
+
+
+def latex_strat_alphas(
+    dfs,
+    adjs,
+    panel_titles,
+    caption: str = "Statical Significance of Machine Learning Factor Portfolio Returns",
+    label: str = "tab:strat-alphas-panels",
+):
+
+    model_order = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB", "COMB", "ORACLE"]
+
+    header_labels = {
+        "OLS": "Linear",
+        "PLS": "PLS",
+        "LASSO": "LASSO",
+        "ENET": "ENET",
+        "RF": "RF",
+        "GBRT": "GBRT",
+        "XGB": "XGB",
+        "COMB": "COMB",
+        "ORACLE": "ORACLE",
+    }
+
+    row_specs = [
+        ("alpha_mean", "tstat_mean", "High-Low"),
+        ("alpha_ff", "tstat_ff", r"$\alpha_{F6}$"),
+        ("alpha_ew", "tstat_ew", r"$\alpha_{EW}$"),
+        ("alpha_random", "tstat_random", r"$\alpha_{\mathrm{R}}$"),
+    ]
+
+    notes = (
+        r"The table reports monthly High--Low returns and benchmark-adjusted alphas for "
+        r"portfolios sorted on model forecasts. Returns and alphas are in percent per month. "
+        r"Parentheses report Newey--West t-statistics with six lags. High--Low is the "
+        r"return difference between the High and Low forecast-sorted portfolios. "
+        r"$\alpha_{F6}$ is the intercept from a regression of High--Low returns on the "
+        r"Fama--French six factors. $\alpha_{EW}$ is the intercept from a regression on "
+        r"the equal-weighted factor return. $\alpha_{\mathrm{Rnd}}$ is the intercept from "
+        r"a regression on the High--Low return from a strategy that randomly assigns "
+        r"factors to High and Low portfolios each month. COMB is the equal-weighted average "
+        r"forecast across available models. ORACLE is a perfect-foresight benchmark: it "
+        r"sorts factors on realized next-month returns, so it gives an ex-post upper bound "
+        r"and is not implementable."
+    )
+
+    def fmt_pct(x):
+        if x is None:
+            return "-"
+        return f"{float(x) * 100:.2f}"
+
+    def fmt_t(x):
+        if x is None:
+            return "-"
+        return f"({float(x):.2f})"
+
+    def build_panel_rows(df, adj):
+        df = df.clone()
+
+        if adj == 2:
+            df = df.with_columns(
+                pl.col("model")
+                .str.replace("_CLS$", "")
+                .str.replace("^LOGIT$", "OLS")
+                .alias("model")
+            )
+
+        row_map = {row["model"]: row for row in df.iter_rows(named=True)}
+
+        rows = []
+        
+        for j, (value_col, tstat_col, row_label) in enumerate(row_specs):
+            
+            value_cells = []
+            tstat_cells = []
+
+            for model in model_order:
+                row = row_map.get(model, None)
+
+                if row is None:
+                    value_cells.append("-")
+                    tstat_cells.append("-")
+                else:
+                    value_cells.append(fmt_pct(row.get(value_col)))
+                    tstat_cells.append(fmt_t(row.get(tstat_col)))
+
+            if j > 0:
+                rows.append(r"\addlinespace[0.3em]")
+
+            rows.append(row_label + " & " + " & ".join(value_cells) + r" \\")
+            rows.append(" & " + " & ".join(tstat_cells) + r" \\")
+
+        return rows
+
+    col_spec = "C{1.8cm} " + " ".join(["Z"] * len(model_order))
+    n_cols = 1 + len(model_order)
+
+    lines = [
+        r"\begin{table}[htbp]",
+        r"\centering",
+        rf"\caption{{{caption}}}",
+        rf"\label{{{label}}}",
+        r"\scriptsize",
+        r"\renewcommand{\arraystretch}{1.0}",
+        rf"\begin{{tabularx}}{{\textwidth}}{{{col_spec}}}",
+        r"\toprule",
+        " & " + " & ".join(
+            rf"\textbf{{{header_labels[model]}}}" for model in model_order
+        ) + r" \\",
+        r"\midrule",
+    ]
+
+    for i, (df, adj, title) in enumerate(zip(dfs, adjs, panel_titles)):
+        if i > 0:
+            lines.append(r"\addlinespace[0.4em]")
+            lines.append(r"\midrule")
+
+        lines.append(
+            rf"\multicolumn{{{n_cols}}}{{l}}{{\textbf{{{title}}}}} \\"
+        )
+
+        lines.extend(build_panel_rows(df, adj))
+
+    lines.extend([
+        r"\bottomrule",
+        "",
+        r"\addlinespace[0.3em]",
+        rf"\multicolumn{{{n_cols}}}{{p{{\dimexpr\textwidth-2\tabcolsep\relax}}}}{{",
+        r"\scriptsize",
+        rf"\textbf{{Notes:}} {notes}}}\\",
+        "",
+        r"\end{tabularx}",
+        "",
+        r"\end{table}",
+    ])
+
+    return "\n".join(lines)
