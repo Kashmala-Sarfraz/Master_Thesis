@@ -3874,7 +3874,7 @@ def latex_strat_alphas(
                     tstat_cells.append(fmt_t(row.get(tstat_col)))
 
             if j > 0:
-                rows.append(r"\addlinespace[0.3em]")
+                rows.append(r"\addlinespace[0.4em]")
 
             rows.append(row_label + " & " + " & ".join(value_cells) + r" \\")
             rows.append(" & " + " & ".join(tstat_cells) + r" \\")
