@@ -6,6 +6,8 @@ import os
 import duckdb
 import pandas as pd
 import polars as pl
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from tqdm import tqdm
 from sktime.split import ExpandingWindowSplitter
 from sklearn.linear_model import Lasso, Ridge, ElasticNet, LinearRegression, LogisticRegression
@@ -3302,26 +3304,26 @@ def compute_backtest_metrics(data_path, excntry, pfs, n_buckets, adj):
             "return_std": ret.std(ddof=1) if len(ret) > 1 else np.nan,
             "sharpe_ratio": sharpe_ratio(ret),
             "sortino_ratio": sortino_ratio(ret),
-            "net_performance": net_performance(ret),
+            #"net_performance": net_performance(ret),
             "max_drawdown": max_drawdown(ret),
             "wins": len(wins),
             "losses": len(losses),
             "average_win": average_win,
             "average_loss": average_loss,
             "reward_to_risk_ratio": reward_to_risk_ratio,
-            "loss_std": losses.std(ddof=1) if len(losses) > 1 else np.nan,
+            #"loss_std": losses.std(ddof=1) if len(losses) > 1 else np.nan,
             #"win_streak_avg": win_streak_avg,
-            "win_streak_max": win_streak_max,
+            #"win_streak_max": win_streak_max,
             #"loss_streak_avg": loss_streak_avg,
-            "loss_streak_max": loss_streak_max,
+            #"loss_streak_max": loss_streak_max,
             "trades_per_month": df_model["trades"].mean(),
-            "active_positions": df_model["positions"].mean(),
+            #"active_positions": df_model["positions"].mean(),
             "turnover": df_model["turnover"].mean(),
             #"entry_trades": df_model["entry_trades"].mean(),
             #"exit_trades": df_model["exit_trades"].mean(),
             #"long_positions": df_model["long_positions"].mean(),
             #"short_positions": df_model["short_positions"].mean(),
-            "n_months": len(ret),
+            #"n_months": len(ret),
         })
 
     metrics_global = pl.from_pandas(pd.DataFrame(metrics_lst))
@@ -3334,115 +3336,6 @@ def compute_backtest_metrics(data_path, excntry, pfs, n_buckets, adj):
 
     return monthly_returns, metrics_global
 
-
-def plot_cumulative_performance(
-        base_path, data_path, excntry, pfs, n_buckets, adj,
-        save=True, show=False):
-
-    import matplotlib.pyplot as plt
-
-    suffix = get_suffix(adj)
-    base = data_path / "portfolio_returns"
-
-    return_path = base / f"{excntry}_{pfs}_{n_buckets}_port_ret_month{suffix}.parquet"
-    plot_dir = base_path / "exhibits"
-   
-
-    strategy_returns = (
-        pl.read_parquet(return_path)
-        .filter((pl.col("model") != "ORACLE") & (pl.col("model") != "RANDOM"))
-        .with_columns(pl.col("eom").cast(pl.Date))
-        .sort(["model", "bucket", "eom"])
-    )
-
-    models = (
-        strategy_returns
-        .select("model")
-        .unique()
-        .to_series()
-        .to_list()
-    )
-
-    out_paths = {}
-
-    for model in models:
-
-        df_model = (
-            strategy_returns
-            .filter(pl.col("model") == model)
-            .sort(["bucket", "eom"])
-            .to_pandas()
-        )
-
-        df_model["eom"] = pd.to_datetime(df_model["eom"])
-
-        bucket_cum = (
-            df_model
-            .sort_values(["bucket", "eom"])
-            .assign(
-                cumulative_return=lambda x:
-                    x.groupby("bucket")["mean_ret_bucket_monthly"]
-                     .transform(lambda r: r.cumsum() * 100)
-            )
-        )
-
-        hml_cum = (
-            df_model[["eom", "hml_ret_monthly"]]
-            .drop_duplicates(subset=["eom"])
-            .sort_values("eom")
-            .assign(cumulative_hml=lambda x: x["hml_ret_monthly"].cumsum() * 100
-            )
-        )
-
-        fig, ax = plt.subplots(figsize=(12, 7))
-
-        for bucket in sorted(bucket_cum["bucket"].unique()):
-
-            tmp = bucket_cum[bucket_cum["bucket"] == bucket]
-
-            ax.plot(
-                tmp["eom"],
-                tmp["cumulative_return"],
-                linewidth=1,
-                alpha=0.75,
-                label=f"Bucket {bucket}"
-            )
-
-        ax.plot(
-            hml_cum["eom"],
-            hml_cum["cumulative_hml"],
-            linewidth=2.5,
-            linestyle="--",
-            label="HML"
-        )
-
-        ax.axhline(0, linewidth=1)
-
-        ax.set_title(
-            f"Cumulative Bucket and HML Performance - {model} "
-            f"({excntry}, {pfs}, {n_buckets} buckets)"
-        )
-        ax.set_xlabel("Date")
-        ax.set_ylabel("Cumulative Return")
-        ax.legend(ncol=2, fontsize=9)
-        ax.grid(True, alpha=0.3)
-
-        fig.tight_layout()
-
-        if save:
-            out_path = (
-                plot_dir
-                / f"{excntry}_{pfs}_{n_buckets}_{model}_cum_perf{suffix}.png"
-            )
-            fig.savefig(out_path, dpi=300, bbox_inches="tight")
-            out_paths[model] = out_path
-
-        if show:
-            plt.show()
-        else:
-            plt.close(fig)
-
-    return out_paths
 
 def latex_pred_perf(
     dfs,
@@ -3471,19 +3364,20 @@ def latex_pred_perf(
     }
 
     notes = (
-        r"Table notes. The table reports average out-of-sample predictive performance for 153 factor returns "
-        r"from October 1986 to September 2024. Performance metrics are averaged over all test observations, "
-        r"Four targets are evaluated: next-month value-weighted excess factor returns (Benchmark), "
-        r"cross-sectionally demeaned next-month returns (Cross-Reg), a binary outperformer indicator "
-        r"based on demeaned returns (Cross-Class), and each factor's within-month percentile rank (Rank-Reg). "
-        r"$R^2_{\mathrm{oos}}$ and balanced accuracy are reported in percent. "
-        r"$\bar{\rho}_s$ and $\bar{\rho}_p$ are averages of monthly Spearman and Pearson "
-        r"cross-sectional correlations. For regression targets, correlations compare "
-        r"predicted and realized target returns. For the classification target, correlations "
-        r"compare predicted outperformance probabilities with realized demeaned returns. "
-        r"COMB is the equal-weighted average forecast across available models; for "
-        r"classification, it averages predicted probabilities."
+        r"The table reports out-of-sample predictive performance for 153 U.S. factor returns "
+        r"from October 1986 to September 2024. Metrics are averaged over all test observations. "
+        r"The targets are next-month value-weighted excess returns (Benchmark), cross-sectionally "
+        r"demeaned returns (Cross-Reg), a binary outperformer indicator (Cross-Class), and "
+        r"within-month percentile ranks (Rank-Reg). "
+        r"$R^2_{\mathrm{oos}}$ and balanced accuracy are in percent. "
+        r"$\bar{\rho}_s$ and $\bar{\rho}_p$ are average monthly Spearman and Pearson "
+        r"cross-sectional correlations between predictions and realizations. "
+        r"For Cross-Class, correlations use predicted outperformance probabilities and realized "
+        r"demeaned returns. "
+        r"COMB is the equal-weighted average forecast across available models; for classification, "
+        r"it averages predicted probabilities."
     )
+
     def build_panel_rows(df, adj):
         score = "balanced_accuracy" if adj == 2 else "r2"
         score_order = [score, "spearman", "pearson"]
@@ -3636,16 +3530,16 @@ def latex_strat_perf(
 
     notes = (
         r"The table reports average realized returns for forecast-sorted factor portfolios "
-        r"using 153 factor returns from October 1986 to September 2024. Each month, factors are "
-        r"sorted by the model forecast. Low contains factors with the lowest predicted next-month "
-        r"values; High contains factors with the highest predicted values. The intermediate rows "
-        r"report average realized returns for the corresponding forecast-sorted portfolios. "
-        r"High--Low reports the average return difference between the High and Low portfolios. "
-        r"Returns are in percent. COMB is the equal-weighted average forecast across available models. "
-        r"For classification, it averages predicted probabilities. "
-        r"ORACLE is a perfect-foresight benchmark: it sorts factors on actual next-month returns, "
-        r"so it gives an ex-post upper bound and is not implementable."
+        r"using 153 U.S. factor returns over the out-of-sample period from October 1986 "
+        r"to September 2024. Each month, factors are sorted into ten portfolios based on "
+        r"model forecasts. Low and High denote the bottom and top forecast deciles, respectively. "
+        r"High--Low is the average return difference between the High and Low portfolios. "
+        r"Returns are in percent per month. "
+        r"COMB is the equal-weighted average forecast across available models; for classification, "
+        r"it averages predicted probabilities. "
+        r"ORACLE sorts on realized next-month returns and is therefore an ex-post, non-implementable benchmark."
     )
+
     def build_panel_rows(df, adj):
         df = df.clone()
 
@@ -3786,14 +3680,11 @@ def latex_strat_perf(
     return "\n".join(lines)
 
 
-import polars as pl
-
-
 def latex_strat_alphas(
     dfs,
     adjs,
     panel_titles,
-    caption: str = "Statical Significance of Machine Learning Factor Portfolio Returns",
+    caption: str = "Statistical Significance of Machine Learning Factor Portfolio Returns",
     label: str = "tab:strat-alphas-panels",
 ):
 
@@ -3819,18 +3710,19 @@ def latex_strat_alphas(
     ]
 
     notes = (
-        r"The table reports monthly High--Low returns and benchmark-adjusted alphas for "
-        r"portfolios sorted on model forecasts. Returns and alphas are in percent per month. "
-        r"Parentheses report Newey--West t-statistics with six lags. High--Low is the "
-        r"return difference between the High and Low forecast-sorted portfolios. "
-        r"$\alpha_{F6}$ is the intercept from a regression of High--Low returns on the "
-        r"Fama--French six factors. $\alpha_{EW}$ is the intercept from a regression on "
-        r"the equal-weighted factor return. $\alpha_{\mathrm{Rnd}}$ is the intercept from "
-        r"a regression on the High--Low return from a strategy that randomly assigns "
-        r"factors to High and Low portfolios each month. COMB is the equal-weighted average "
-        r"forecast across available models. ORACLE is a perfect-foresight benchmark: it "
-        r"sorts factors on realized next-month returns, so it gives an ex-post upper bound "
-        r"and is not implementable."
+        r"The table reports monthly returns and alphas for long-short factor portfolios "
+        r"using 153 U.S. factor returns over the out-of-sample period from October 1986 "
+        r"to September 2024. Each month, the strategy is long the top forecast decile "
+        r"and short the bottom forecast decile. "
+        r"Returns and alphas are in percent per month; Newey--West t-statistics with six lags "
+        r"are in parentheses. "
+        r"$\alpha_{F6}$, $\alpha_{EW}$, and $\alpha_{\mathrm{Rnd}}$ are intercepts from "
+        r"time-series regressions of High--Low returns on the Fama--French six factors, "
+        r"the equal-weighted factor return, and the High--Low return of a random sorting "
+        r"strategy, respectively. "
+        r"COMB is the equal-weighted average forecast across available models; for classification, "
+        r"it averages predicted probabilities. "
+        r"ORACLE sorts on realized next-month returns and is therefore an ex-post, non-implementable benchmark."
     )
 
     def fmt_pct(x):
@@ -3924,3 +3816,560 @@ def latex_strat_alphas(
     ])
 
     return "\n".join(lines)
+
+def latex_strat_metrics(
+    dfs,
+    adjs,
+    panel_titles,
+    caption="Performance Metrics for Machine Learning Factor Portfolios",
+    label="tab:strat-metrics",
+):
+
+    models = [
+        "OLS",
+        "PLS",
+        "LASSO",
+        "ENET",
+        "RF",
+        "GBRT",
+        "XGB",
+        "COMB",
+    ]
+
+    model_labels = {
+        "OLS": "Linear",
+        "PLS": "PLS",
+        "LASSO": "LASSO",
+        "ENET": "ENET",
+        "RF": "RF",
+        "GBRT": "GBRT",
+        "XGB": "XGB",
+        "COMB": "COMB",
+    }
+
+    metrics_to_show = [
+        "average_return",
+        "return_std",
+        "sharpe_ratio",
+        #"sortino_ratio",
+        "max_drawdown",
+        "wins",
+        "losses",
+        "average_win",
+        "average_loss",
+        "reward_to_risk_ratio",
+        "trades_per_month",
+        "turnover",
+    ]
+
+    metric_labels = {
+        "average_return": "Return",
+        "return_std": "Volatility",
+        "sharpe_ratio": "Sharpe ratio",
+        #"sortino_ratio": "Sortino ratio",
+        "max_drawdown": "Max. drawdown",
+        "wins": "Positive months",
+        "losses": "Negative months",
+        "average_win": "Avg. Win",
+        "average_loss": "Avg. Loss",
+        "reward_to_risk_ratio": "Reward-to-Risk",
+        "trades_per_month": "Trades per month",
+        "turnover": "Position turnover",
+    }
+
+    percent_metrics = {
+        "average_return",
+        "return_std",
+        "max_drawdown",
+        "average_win",
+        "average_loss",
+        "turnover",
+    }
+
+    integer_metrics = {
+        "wins",
+        "losses",
+    }
+
+    def fmt(value, metric):
+        if pd.isna(value):
+            return "-"
+
+        if metric in percent_metrics:
+            return f"{100 * value:.2f}"
+
+        if metric in integer_metrics:
+            return f"{int(value)}"
+
+        if metric == "trades_per_month":
+            return f"{value:.2f}"
+
+        return f"{value:.3f}"
+
+    def to_pandas_safe(df):
+        if hasattr(df, "to_pandas"):
+            return df.to_pandas().copy()
+        return df.copy()
+
+    n_cols = 1 + len(models)
+    tabular_spec = "L{2cm}" + " ".join(["Z"] * len(models))
+
+    notes = (
+        "The table reports backtest metrics for monthly long-short factor portfolios "
+        "using 153 U.S. factor returns over the out-of-sample period from October 1986 "
+        "to September 2024. Each month, the strategy is long the top forecast decile "
+        "and short the bottom forecast decile. "
+        "Return, volatility, average win, and average loss are in percent per month; "
+        "maximum drawdown and position turnover are in percent. "
+        "The Sharpe ratio is annualized from monthly returns. "
+        "Positive and negative months count months with positive and negative portfolio returns. "
+        "Trades per month counts average entries and exits in the long and short legs. "
+        "Position turnover is trades divided by active long and short positions. "
+        "COMB is the equal-weighted average forecast across available models; for classification, "
+        "it averages predicted probabilities."
+    )
+
+    lines = []
+
+    lines.append(r"\begin{table}[htbp]")
+    lines.append(r"\centering")
+    lines.append(fr"\caption{{{caption}}}")
+    lines.append(fr"\label{{{label}}}")
+    lines.append(r"\scriptsize")
+    lines.append(r"\renewcommand{\arraystretch}{1.2}")
+    lines.append(fr"\begin{{tabularx}}{{\textwidth}}{{{tabular_spec}}}")
+    lines.append(r"\toprule")
+
+    header = (
+        " & "
+        + " & ".join([fr"\textbf{{{model_labels[m]}}}" for m in models])
+        + r" \\"
+    )
+    lines.append(header)
+    lines.append(r"\midrule")
+
+    for df, adj, panel_title in zip(dfs, adjs, panel_titles):
+        
+        if adj == 2:
+            df = df.with_columns(
+                pl.col("model")
+                .str.replace("_CLS$", "")
+                .str.replace("^LOGIT$", "OLS")
+                .alias("model")
+            )
+        df_pd = to_pandas_safe(df)
+
+        lines.append(fr"\multicolumn{{{n_cols}}}{{l}}{{\textbf{{{panel_title}}}}} \\")
+
+        for metric in metrics_to_show:
+            row_vals = []
+
+            for model in models:
+                row_df = df_pd.loc[df_pd["model"].eq(model)]
+
+                if row_df.empty:
+                    row_vals.append("-")
+                else:
+                    value = row_df.iloc[0][metric]
+                    row_vals.append(fmt(value, metric))
+
+            row = metric_labels[metric]
+            row += " & " + " & ".join(row_vals)
+            row += r" \\"
+            lines.append(row)
+
+        if panel_title != panel_titles[-1]:
+            lines.append(r"\addlinespace[0.3em]")
+            lines.append(r"\midrule")
+
+    lines.append(r"\bottomrule")
+    lines.append("")
+    lines.append(r"\addlinespace[0.3em]")
+    lines.append(
+        fr"\multicolumn{{{n_cols}}}{{p{{\dimexpr\textwidth-2\tabcolsep\relax}}}}{{"
+    )
+    lines.append(r"\scriptsize")
+    lines.append(fr"\textbf{{Notes:}} {notes}}}\\")
+    lines.append("")
+    lines.append(r"\end{tabularx}")
+    lines.append("")
+    lines.append(r"\end{table}")
+
+    return "\n".join(lines)
+
+
+def plot_cum_perf_buck(
+        base_path,
+        data_path,
+        excntry,
+        pfs,
+        n_buckets,
+        adj,
+        save=True,
+        show=False
+):
+
+
+    suffix = get_suffix(adj)
+
+    base = data_path / "portfolio_returns"
+    return_path = base / f"{excntry}_{pfs}_{n_buckets}_port_ret_month{suffix}.parquet"
+
+    plot_dir = base_path / "exhibits"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    strategy_returns = (
+        pl.read_parquet(return_path)
+        .filter(
+            (pl.col("model") != "ORACLE") &
+            (pl.col("model") != "RANDOM")
+        )
+        .with_columns(pl.col("eom").cast(pl.Date))
+        .sort(["model", "bucket", "eom"])
+    )
+
+    if adj == 2:
+        strategy_returns = strategy_returns.with_columns(
+            pl.col("model").str.replace("_CLS$", "").str.replace("^LOGIT$", "OLS")
+            .alias("model")
+    )
+
+    df = strategy_returns.to_pandas()
+
+    df["eom"] = pd.to_datetime(df["eom"])
+
+    df["model"] = df["model"].replace({"OLS": "Linear"})
+
+    df = (
+        df.sort_values(["model", "bucket", "eom"])
+        .assign(
+            cumulative_return=lambda x:
+                x.groupby(["model", "bucket"])["mean_ret_bucket_monthly"]
+                 .transform(lambda r: r.cumsum() * 100)
+        )
+    )
+
+    available_models = df["model"].unique().tolist()
+    preferred_order = ["Linear", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB", "FFNN", "COMB"]
+    models = [m for m in preferred_order if m in available_models]
+
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=4,
+        figsize=(12, 6),
+        sharex=True,
+        sharey=True
+    )
+
+    axes = axes.flatten()
+
+    # If 7 models: use 3 plots on top and 4 below
+    if len(models) == 7:
+        plot_axes = [
+            axes[0], axes[1], axes[2],
+            axes[4], axes[5], axes[6], axes[7]
+        ]
+    else:
+        plot_axes = axes[:len(models)]
+
+    for ax, model in zip(plot_axes, models):
+
+        df_model = df[df["model"] == model]
+
+        for bucket in sorted(df_model["bucket"].unique()):
+
+            tmp = df_model[df_model["bucket"] == bucket]
+
+            ax.plot(
+                tmp["eom"],
+                tmp["cumulative_return"],
+                linewidth=1.8,
+                alpha=0.75,
+                label=f"Bucket {bucket}"
+            )
+
+        ax.axhline(0, linewidth=0.9, color="0.75", alpha=1.0)
+
+        ax.set_title(model, fontsize=9, fontweight="bold", pad=0)
+        ax.grid(True, color="0.75",linewidth=0.8,alpha=0.8)
+
+        axis_grey = "0.75"
+
+        ax.spines["left"].set_color(axis_grey)
+        ax.spines["bottom"].set_color(axis_grey)
+        ax.spines["left"].set_linewidth(1.0)
+        ax.spines["bottom"].set_linewidth(1.0)
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+
+        ax.tick_params(
+            axis="both",
+            colors=axis_grey,
+            labelcolor="black",
+            width=1.0
+        )
+
+        ax.xaxis.set_major_locator(mdates.YearLocator(10))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+
+    used_axes = set(plot_axes)
+
+    for ax in axes:
+        if ax not in used_axes:
+            ax.set_visible(False)
+
+    fig.text(
+        0.015, 0.5,
+        "Cumulative Return(%)",
+        va="center",
+        rotation="vertical",
+        fontsize=12,
+    )
+
+    handles, labels = axes[0].get_legend_handles_labels()
+
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=len(labels) // 2,
+        frameon=False,
+        fontsize=9
+    )
+
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.995,
+        bottom=0.12,
+        top=0.94,
+        wspace=0.07,
+        hspace=0.11
+    )
+    out_path = None
+
+    if save:
+        out_path = (
+            plot_dir
+            / f"{excntry}_{pfs}_{n_buckets}_cum_perf{suffix}.png"
+        )
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return out_path
+
+
+def plot_cum_perf_hml(
+        base_path,
+        data_path,
+        excntry,
+        pfs,
+        n_buckets,
+        adjs,
+        adj_labels=None,
+        save=True,
+        show=False
+):
+
+
+
+    base = data_path / "portfolio_returns"
+
+    plot_dir = base_path / "exhibits"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    dfs = []
+
+    for adj in adjs:
+
+        suffix = get_suffix(adj)
+
+        return_path = (
+            base
+            / f"{excntry}_{pfs}_{n_buckets}_port_ret_month{suffix}.parquet"
+        )
+
+        tmp = (
+            pl.read_parquet(return_path)
+            .filter(
+                (pl.col("model") != "ORACLE") &
+                (pl.col("model") != "RANDOM")
+            )
+            .with_columns([
+                pl.col("eom").cast(pl.Date),
+                pl.lit(adj).alias("adj"),
+                pl.lit(adj_labels.get(adj, f"Adj. {adj}")).alias("adjustment")
+            ])
+        )
+
+        if adj == 2:
+            tmp = tmp.with_columns(
+                pl.col("model")
+                .str.replace("_CLS$", "")
+                .str.replace("^LOGIT$", "OLS")
+                .alias("model")
+            )
+
+        tmp = (
+            tmp
+            .group_by(["eom", "model", "adj", "adjustment"])
+            .agg(
+                pl.first("hml_ret_monthly").alias("hml_ret_monthly")
+            )
+            .sort(["model", "adjustment", "eom"])
+        )
+
+        dfs.append(tmp)
+
+    strategy_returns = pl.concat(dfs)
+
+    df = strategy_returns.to_pandas()
+
+    df["eom"] = pd.to_datetime(df["eom"])
+
+    df["model"] = df["model"].replace({"OLS": "Linear"})
+
+    df = (
+        df.sort_values(["model", "adj", "eom"])
+        .assign(
+            cumulative_return=lambda x:
+                x.groupby(["model", "adj"])["hml_ret_monthly"]
+                 .transform(lambda r: r.cumsum() * 100)
+        )
+    )
+
+    available_models = df["model"].unique().tolist()
+
+    preferred_order = [
+        "Linear", "PLS", "LASSO", "ENET",
+        "RF", "GBRT", "XGB", "FFNN", "COMB"
+    ]
+
+    models = [m for m in preferred_order if m in available_models]
+
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=4,
+        figsize=(12, 6),
+        sharex=True,
+        sharey=True
+    )
+
+    axes = axes.flatten()
+
+    if len(models) == 7:
+        plot_axes = [
+            axes[0], axes[1], axes[2],
+            axes[4], axes[5], axes[6], axes[7]
+        ]
+    else:
+        plot_axes = axes[:len(models)]
+
+    axis_grey = "0.75"
+
+    for ax, model in zip(plot_axes, models):
+
+        df_model = df[df["model"] == model]
+
+        for adj in adjs:
+
+            tmp = df_model[df_model["adj"] == adj]
+
+            if tmp.empty:
+                continue
+
+            ax.plot(
+                tmp["eom"],
+                tmp["cumulative_return"],
+                linewidth=1.8,
+                alpha=0.80,
+                label=adj_labels.get(adj, f"Adj. {adj}")
+            )
+
+        ax.axhline(0, linewidth=0.9, color="0.75", alpha=1.0)
+
+        ax.set_title(model, fontsize=9, fontweight="bold", pad=0)
+
+        ax.grid(
+            True,
+            color="0.75",
+            linewidth=0.8,
+            alpha=0.8
+        )
+
+        ax.spines["left"].set_color(axis_grey)
+        ax.spines["bottom"].set_color(axis_grey)
+        ax.spines["left"].set_linewidth(1.0)
+        ax.spines["bottom"].set_linewidth(1.0)
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        ax.tick_params(
+            axis="both",
+            colors=axis_grey,
+            labelcolor="black",
+            width=1.0
+        )
+
+        ax.xaxis.set_major_locator(mdates.YearLocator(10))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+
+    used_axes = set(plot_axes)
+
+    for ax in axes:
+        if ax not in used_axes:
+            ax.set_visible(False)
+
+    fig.text(
+        0.015,
+        0.5,
+        "Cumulative Return (%)",
+        va="center",
+        rotation="vertical",
+        fontsize=12,
+    )
+
+    handles, labels = plot_axes[0].get_legend_handles_labels()
+
+    fig.legend(
+        handles,
+        labels,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.02),
+        ncol=max(1, len(labels)),
+        frameon=False,
+        fontsize=9
+    )
+
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.995,
+        bottom=0.12,
+        top=0.94,
+        wspace=0.07,
+        hspace=0.11
+    )
+
+    out_path = None
+
+    if save:
+        out_path = (
+            plot_dir
+            / f"{excntry}_{pfs}_{n_buckets}_cum_perf_hml.png"
+        )
+
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return out_path

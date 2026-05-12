@@ -21,10 +21,12 @@ from my_aux_functions import(
     eval_strategy_returns,
     eval_strategy_returns_period,
     compute_backtest_metrics,
-    plot_cumulative_performance,
+    plot_cum_perf_buck,
+    plot_cum_perf_hml,
     latex_pred_perf,
     latex_strat_perf,
-    latex_strat_alphas)
+    latex_strat_alphas,
+    latex_strat_metrics)
 
 BASE_DIR = Path.home()/"Desktop"/"Master_Thesis"/"my_data"
 CODE_DIR = BASE_DIR / "code"
@@ -209,9 +211,9 @@ bt_metrics_gl = {}
 bt_month = {}
 
 for cntry in ["USA"]:
-    for pfs in [10, 3, 4]:
-        for n_buck in [10, 3, 4]:
-            for adjust in [0, 1, 2, 3]:
+    for pfs in [10]:#, 3, 4
+        for n_buck in [10]:#, 3, 4
+            for adjust in [0, 1, 2]:#, 3
 
                 key = (cntry, pfs, n_buck, adjust)
 
@@ -219,23 +221,6 @@ for cntry in ["USA"]:
 
                 bt_month[key], bt_metrics_gl[key] = compute_backtest_metrics(
                      data_path=DATA_DIR, excntry = cntry, pfs = pfs, n_buckets=n_buck, adj=adjust)
-# %%
-
-plot_paths = {}
-
-for cntry in ["USA"]:
-    for pfs in [10, 3, 4]:
-        for n_buck in [10, 3, 4]:
-            for adjust in [0, 1, 2, 3]:
-
-                key = (cntry, pfs, n_buck, adjust)
-
-                print(key)
-
-                plot_paths[key] = plot_cumulative_performance(
-                    data_path=DATA_DIR,base_path= BASE_DIR, excntry=cntry, pfs=pfs, n_buckets=n_buck,
-                    adj=adjust, save=True, show=False
-                )
 
 # %% Predictive Performance for the Cross Section of Factor Returns
 print(latex_pred_perf(
@@ -255,7 +240,7 @@ print(latex_pred_perf(
     )
 )
 
-# %%
+# %% Returns on Machine Learning Factor Portfolios
 print(
     latex_strat_perf(
         dfs=[
@@ -273,7 +258,7 @@ print(
         ]
     )
 )
-# %%
+# %% Statistical Significance of Machine Learning Factor Portfolio Returns
 print(
     latex_strat_alphas(
         dfs=[
@@ -291,4 +276,64 @@ print(
         ]
     )
 )
+# %%
+print(
+    latex_strat_metrics(
+        dfs=[
+            bt_metrics_gl["USA", 10, 10, 0],
+            bt_metrics_gl["USA", 10, 10, 1],
+            bt_metrics_gl["USA", 10, 10, 2],
+            # bt_metrics_gl["USA", 10, 10, 3],
+        ],
+        adjs=[0, 1, 2],
+        panel_titles=[
+            "Benchmark",
+            "Cross-Reg",
+            "Cross-Class",
+            # "Rank-Reg",
+        ]
+    )
+)
+
+# %% Cumualtive Performance
+plot_paths = {}
+
+for cntry in ["USA"]:
+    for pfs in [10]:#, 3, 4
+        for n_buck in [10]: #, 3, 4
+            for adjust in [0, 1, 2]: #, 3
+
+                key = (cntry, pfs, n_buck, adjust)
+
+                print(key)
+
+                plot_paths[key] = plot_cum_perf_buck(
+                    data_path=DATA_DIR,base_path= BASE_DIR, excntry=cntry, pfs=pfs, n_buckets=n_buck,
+                    adj=adjust, save=True, show=True
+                )
+
+# %% Cumualtive Performance
+plot_paths_hml = {}
+
+for cntry in ["USA"]:
+    for pfs in [10]:#, 3, 4
+        for n_buck in [10]: #, 3, 4
+               
+                key = (cntry, pfs, n_buck)
+                
+                plot_paths_hml[key] = plot_cum_perf_hml(
+                    data_path=DATA_DIR,
+                    base_path= BASE_DIR,
+                    excntry=cntry,
+                    pfs=pfs,
+                    n_buckets=n_buck,
+                    adjs=(0, 1, 2),
+                    adj_labels={
+                            0: "Benchmark",
+                            1: "Cross-Reg",
+                            2: "Cross-Class."
+                        },
+                        save=True,
+                        show=True
+                    )
 # %%
