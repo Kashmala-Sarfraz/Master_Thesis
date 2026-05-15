@@ -2526,77 +2526,94 @@ def add_comb_model(excntry, pfs, data_path, adj):
 
     return monthly_df, global_df, vi_month_df, vi_global_df
 
-def write_period_return_file(
-        all_port_ret_monthly, base, excntry, pfs, n_buckets, suffix, periods):
+def sent_port_ret(all_port_ret_monthly, sent, base, excntry, pfs, n_buckets, suffix):
 
-    period_monthly_lst = []
-    period_global_lst = []
-
-    for period_name, (start_date, end_date) in periods.items():
-        
-        period_monthly_df = (
-            all_port_ret_monthly
-            .filter(
-                (pl.col("eom") >= pl.lit(start_date).str.strptime(pl.Date)) &
-                (pl.col("eom") <= pl.lit(end_date).str.strptime(pl.Date))
+    sent = (
+        sent
+        .select(["yearmo", "SENT"])
+        .with_columns(
+            pl.col("yearmo").cast(pl.Int64).alias("yearmo")
+        )
+        .with_columns(
+            pl.date(
+                (pl.col("yearmo") // 100).cast(pl.Int32),
+                (pl.col("yearmo") % 100).cast(pl.Int32),
+                1
             )
-            .with_columns([
-                pl.lit(period_name).alias("period"),
-                pl.lit(start_date).str.strptime(pl.Date).alias("start_date"),
-                pl.lit(end_date).str.strptime(pl.Date).alias("end_date"),
-            ])
+            .dt.month_end()
+            .alias("eom")
         )
+        .select(["eom", "SENT"])
+        .drop_nulls()
+        .unique("eom")
+    )
 
-        if period_monthly_df.height == 0:
-            continue
+    sent_median = (
+        all_port_ret_monthly
+        .select("eom")
+        .unique()
+        .join(sent, on="eom", how="inner")
+        .select(pl.col("SENT").median())
+        .item()
+    )
 
-        period_monthly_lst.append(period_monthly_df)
+    all_sent_monthly_df = (
+        all_port_ret_monthly
+        .join(sent, on="eom", how="inner")
+        .with_columns([
+            pl.when(pl.col("SENT") > sent_median)
+            .then(pl.lit("Bull"))
+            .otherwise(pl.lit("Bear"))
+            .alias("period"),
 
-        period_global_df = (
-            period_monthly_df
-            .group_by(["model", "bucket"])
-            .agg(
-                pl.col("mean_ret_bucket_monthly").mean().alias("mean_ret_bucket_period"))
-            .with_columns([
-                pl.lit(excntry).alias("excntry"),
-                pl.lit(pfs).alias("pfs"),
-                pl.lit(n_buckets).alias("n_buckets"),
-                pl.lit(period_name).alias("period"),
-                pl.lit(start_date).str.strptime(pl.Date).alias("start_date"),
-                pl.lit(end_date).str.strptime(pl.Date).alias("end_date"),
-            ])
+            pl.lit(sent_median).alias("median"),
+            pl.col("SENT").alias("sentiment"),
+        ])
+    )
+
+
+    all_sent_global_df = (
+        all_sent_monthly_df
+        .group_by(["model", "period", "bucket"])
+        .agg(
+            pl.col("mean_ret_bucket_monthly")
+            .mean()
+            .alias("mean_ret_bucket_period")
         )
-
-
-        period_global_df = period_global_df.with_columns(
+        .with_columns([
+            pl.lit(excntry).alias("excntry"),
+            pl.lit(pfs).alias("pfs"),
+            pl.lit(n_buckets).alias("n_buckets"),
+            pl.lit(sent_median).alias("median"),
+        ])
+        .with_columns(
             (
                 pl.col("mean_ret_bucket_period")
-                .filter(pl.col("bucket") == n_buckets).first().over("model")
+                .filter(pl.col("bucket") == n_buckets)
+                .first()
+                .over(["model", "period"])
                 -
                 pl.col("mean_ret_bucket_period")
-                .filter(pl.col("bucket") == 1).first().over("model")
+                .filter(pl.col("bucket") == 1)
+                .first()
+                .over(["model", "period"])
             ).alias("hml_ret_period")
         )
-
-        period_global_lst.append(period_global_df)
-        
-    if len(period_monthly_lst) == 0:
-        return None, None
-
-    all_period_monthly_df = pl.concat(period_monthly_lst)
-    all_period_global_df = pl.concat(period_global_lst)
+        .sort(["model", "period", "bucket"])
+    )
 
     out_path_monthly = (
-        base / f"{excntry}_{pfs}_{n_buckets}_port_ret_period_month{suffix}.parquet")
+        base / f"{excntry}_{pfs}_{n_buckets}_port_ret_sent_month{suffix}.parquet"
+    )
 
     out_path_global = (
-        base / f"{excntry}_{pfs}_{n_buckets}_port_ret_period_global{suffix}.parquet")
+        base / f"{excntry}_{pfs}_{n_buckets}_port_ret_sent_global{suffix}.parquet"
+    )
 
-    all_period_monthly_df.write_parquet(out_path_monthly)
-    all_period_global_df.write_parquet(out_path_global)
+    all_sent_monthly_df.write_parquet(out_path_monthly)
+    all_sent_global_df.write_parquet(out_path_global)
 
-    return all_period_monthly_df, all_period_global_df
-
+    return all_sent_monthly_df, all_sent_global_df
 
 def build_strategy_returns(data_path, excntry, pfs, n_buckets, adj):
     
@@ -2730,19 +2747,19 @@ def build_strategy_returns(data_path, excntry, pfs, n_buckets, adj):
     all_port_ret_monthly = pl.concat(monthly_lst)
     all_port_ret_global = pl.concat(global_lst)
 
-    periods = {
-        "dotcom": ("2000-03-31", "2002-10-31"),
-        "gfc": ("2007-07-31", "2009-03-31"),
-        "covid": ("2020-02-29", "2021-12-31")}
+    sent = (
+        pl.read_excel(data_path / "sentiment.xlsx", sheet_name="DATA")
+        .select(["yearmo", "SENT"])
+    )
 
-    all_port_ret_period_monthly, all_port_ret_period_global = write_period_return_file(
+    all_port_ret_sent_monthly, all_port_ret_sent_global = sent_port_ret(
         all_port_ret_monthly=all_port_ret_monthly,
+        sent=sent,
         base=base,
         excntry=excntry,
         pfs=pfs,
         n_buckets=n_buckets,
-        suffix=suffix,
-        periods=periods
+        suffix=suffix
     )
 
     out_path_mon = base/f"{excntry}_{pfs}_{n_buckets}_port_ret_month{suffix}.parquet"
@@ -2753,7 +2770,7 @@ def build_strategy_returns(data_path, excntry, pfs, n_buckets, adj):
     all_port_ret_bucket.write_parquet(out_path_buck)
     all_port_ret_global.write_parquet(out_path_gl)
 
-    return all_port_ret_global, all_port_ret_monthly, all_port_ret_bucket, all_port_ret_period_monthly, all_port_ret_period_global
+    return all_port_ret_global, all_port_ret_monthly, all_port_ret_bucket, all_port_ret_sent_monthly, all_port_ret_sent_global
 
 
 def compute_turnover(df):
@@ -2975,7 +2992,7 @@ def eval_strategy_returns(
         return all_regressions_strategy, all_turnovers, all_regressions_bucket
 
 
-def eval_strategy_returns_period(
+def eval_strategy_returns_sent(
         data_path, excntry, pfs, n_buckets, adj):
 
     suffix = get_suffix(adj)
@@ -2983,7 +3000,7 @@ def eval_strategy_returns_period(
     base = data_path / "portfolio_returns"
 
     bucket_path = base / f"{excntry}_{pfs}_{n_buckets}_factor_to_bucket{suffix}.parquet"
-    period_return_path = base / f"{excntry}_{pfs}_{n_buckets}_port_ret_period_month{suffix}.parquet"
+    period_return_path = base / f"{excntry}_{pfs}_{n_buckets}_port_ret_sent_month{suffix}.parquet"
 
     factor_to_bucket = pl.read_parquet(bucket_path)
     strategy_returns = pl.read_parquet(period_return_path)
@@ -3088,7 +3105,7 @@ def eval_strategy_returns_period(
 
     all_period_regressions = pl.DataFrame(regression_lst)
 
-    out_path = base/f"{excntry}_{pfs}_{n_buckets}_regress_strat_period{suffix}.parquet"
+    out_path = base/f"{excntry}_{pfs}_{n_buckets}_regress_strat_sent{suffix}.parquet"
 
     all_period_regressions.write_parquet(out_path)
 
@@ -3337,6 +3354,213 @@ def compute_backtest_metrics(data_path, excntry, pfs, n_buckets, adj):
     return monthly_returns, metrics_global
 
 
+def compute_backtest_metrics_sent(data_path, excntry, pfs, n_buckets, adj):
+
+    suffix = get_suffix(adj)
+    base = data_path / "portfolio_returns"
+
+    sent_return_path = (
+        base / f"{excntry}_{pfs}_{n_buckets}_port_ret_sent_month{suffix}.parquet"
+    )
+
+    bucket_path = (
+        base / f"{excntry}_{pfs}_{n_buckets}_factor_to_bucket{suffix}.parquet"
+    )
+
+    meta_path = (
+        data_path / "factor_characteristics" / f"{excntry}_{pfs}_meta{suffix}.parquet"
+    )
+
+    strategy_returns = (
+        pl.read_parquet(sent_return_path)
+        .filter(pl.col("model") != "ORACLE")
+    )
+
+    factor_to_bucket = (
+        pl.read_parquet(bucket_path)
+        .filter(pl.col("model") != "ORACLE")
+    )
+
+    meta = (
+        pl.read_parquet(meta_path)
+        .select(["row_id", "characteristics"])
+    )
+
+    factor_to_bucket = factor_to_bucket.join(meta, on="row_id", how="left")
+
+    def sharpe_ratio(ret):
+        ret = pd.Series(ret).dropna()
+        if len(ret) < 2:
+            return np.nan
+        std = ret.std(ddof=1)
+        if std == 0:
+            return np.nan
+        return ret.mean() / std * np.sqrt(12)
+
+    def sortino_ratio(ret):
+        ret = pd.Series(ret).dropna()
+        downside = ret[ret < 0]
+        if len(ret) < 2 or len(downside) < 2:
+            return np.nan
+        downside_std = downside.std(ddof=1)
+        if downside_std == 0:
+            return np.nan
+        return ret.mean() / downside_std * np.sqrt(12)
+
+    def max_drawdown(ret):
+        ret = pd.Series(ret).dropna()
+        if len(ret) == 0:
+            return np.nan
+        wealth = (1 + ret).cumprod()
+        peak = wealth.cummax()
+        drawdown = wealth / peak - 1
+        return drawdown.min()
+
+    active = (
+        factor_to_bucket
+        .filter(pl.col("bucket").is_in([1, n_buckets]))
+        .with_columns(
+            pl.when(pl.col("bucket") == n_buckets)
+            .then(pl.lit("LONG"))
+            .otherwise(pl.lit("SHORT"))
+            .alias("side")
+        )
+        .select(["model", "eom", "characteristics", "side"])
+        .unique()
+        .sort(["model", "eom", "side", "characteristics"])
+    )
+
+    monthly_positions = (
+        active
+        .group_by(["model", "eom"])
+        .agg([
+            pl.len().alias("positions"),
+            (pl.col("side") == "LONG").sum().alias("long_positions"),
+            (pl.col("side") == "SHORT").sum().alias("short_positions"),
+            pl.struct(["characteristics", "side"]).alias("position_set"),
+        ])
+        .sort(["model", "eom"])
+        .with_columns(
+            pl.col("position_set")
+            .shift(1)
+            .over("model")
+            .alias("prev_position_set")
+        )
+        .with_columns([
+            pl.struct(["position_set", "prev_position_set"]).map_elements(
+                lambda x: (
+                    len(
+                        set((p["characteristics"], p["side"]) for p in x["position_set"])
+                        -
+                        set((p["characteristics"], p["side"]) for p in x["prev_position_set"])
+                    )
+                    if x["prev_position_set"] is not None else None
+                ),
+                return_dtype=pl.Int64
+            ).alias("entry_trades"),
+
+            pl.struct(["position_set", "prev_position_set"]).map_elements(
+                lambda x: (
+                    len(
+                        set((p["characteristics"], p["side"]) for p in x["prev_position_set"])
+                        -
+                        set((p["characteristics"], p["side"]) for p in x["position_set"])
+                    )
+                    if x["prev_position_set"] is not None else None
+                ),
+                return_dtype=pl.Int64
+            ).alias("exit_trades"),
+        ])
+        .with_columns([
+            (pl.col("entry_trades") + pl.col("exit_trades")).alias("trades"),
+            (
+                (pl.col("entry_trades") + pl.col("exit_trades"))
+                / pl.col("positions")
+            ).alias("turnover"),
+        ])
+        .drop(["position_set", "prev_position_set"])
+    )
+
+    monthly_returns = (
+        strategy_returns
+        .group_by(["model", "period", "eom"])
+        .agg([
+            pl.col("hml_ret_monthly").first().alias("strategy_ret"),
+            pl.col("sentiment").first().alias("sentiment"),
+            pl.col("median").first().alias("median"),
+        ])
+        .join(monthly_positions, on=["model", "eom"], how="left")
+        .sort(["model", "period", "eom"])
+    )
+
+    monthly_pd = monthly_returns.to_pandas()
+    monthly_pd["eom"] = pd.to_datetime(monthly_pd["eom"])
+
+    metrics_lst = []
+
+    for (model, period), df_group in monthly_pd.groupby(["model", "period"]):
+
+        df_group = df_group.sort_values("eom").copy()
+        ret = df_group["strategy_ret"].dropna()
+
+        if len(ret) == 0:
+            continue
+
+        wins = ret[ret > 0]
+        losses = ret[ret < 0]
+
+        average_win = wins.mean() if len(wins) > 0 else np.nan
+        average_loss = losses.mean() if len(losses) > 0 else np.nan
+
+        reward_to_risk_ratio = (
+            abs(average_win / average_loss)
+            if pd.notna(average_win)
+            and pd.notna(average_loss)
+            and average_loss != 0
+            else np.nan
+        )
+
+        metrics_lst.append({
+            "country": excntry,
+            "pfs": pfs,
+            "model": model,
+            "period": period,
+            "n_buckets": n_buckets,
+            "n_months": len(ret),
+            "average_return": ret.mean(),
+            "return_std": ret.std(ddof=1) if len(ret) > 1 else np.nan,
+            "sharpe_ratio": sharpe_ratio(ret),
+            "sortino_ratio": sortino_ratio(ret),
+            "max_drawdown": max_drawdown(ret),
+            "wins": len(wins),
+            "losses": len(losses),
+            "average_win": average_win,
+            "average_loss": average_loss,
+            "reward_to_risk_ratio": reward_to_risk_ratio,
+            "trades_per_month": df_group["trades"].mean(),
+            "turnover": df_group["turnover"].mean(),
+            "long_positions": df_group["long_positions"].mean(),
+            "short_positions": df_group["short_positions"].mean(),
+            "avg_sentiment": df_group["sentiment"].mean(),
+            "sentiment_median": df_group["median"].iloc[0],
+        })
+
+    metrics_sent = pl.from_pandas(pd.DataFrame(metrics_lst))
+
+    out_path_month = (
+        base / f"{excntry}_{pfs}_{n_buckets}_backtest_metrics_sent_month{suffix}.parquet"
+    )
+
+    out_path_global = (
+        base / f"{excntry}_{pfs}_{n_buckets}_backtest_metrics_sent_global{suffix}.parquet"
+    )
+
+    monthly_returns.write_parquet(out_path_month)
+    metrics_sent.write_parquet(out_path_global)
+
+    return monthly_returns, metrics_sent
+
+
 def latex_pred_perf(
     dfs,
     adjs,
@@ -3364,18 +3588,28 @@ def latex_pred_perf(
     }
 
     notes = (
-        r"The table reports out-of-sample predictive performance for 153 U.S. factor returns "
-        r"from October 1986 to September 2024. Metrics are averaged over all test observations. "
-        r"The targets are next-month value-weighted excess returns (Benchmark), cross-sectionally "
-        r"demeaned returns (Cross-Reg), a binary outperformer indicator (Cross-Class), and "
-        r"within-month percentile ranks (Rank-Reg). "
-        r"$R^2_{\mathrm{oos}}$ and balanced accuracy are in percent. "
-        r"$\bar{\rho}_s$ and $\bar{\rho}_p$ are average monthly Spearman and Pearson "
-        r"cross-sectional correlations between predictions and realizations. "
-        r"For Cross-Class, correlations use predicted outperformance probabilities and realized "
-        r"demeaned returns. "
-        r"COMB is the equal-weighted average forecast across available models; for classification, "
-        r"it averages predicted probabilities."
+        r"\textbf{Notes:} This table reports the prediction performance measures for machine "
+        r"learning models applied to the cross section of factor returns: the out-of-sample "
+        r"$R^2$ coefficients ($R^2_{\mathrm{oos}}$), out-of-sample balanced accuracy "
+        r"($BACC_{\mathrm{oos}}$), and average monthly Spearman ($\bar{\rho}_s$) and "
+        r"Pearson ($\bar{\rho}_p$) correlation coefficients between predicted and realized "
+        r"outcomes. $R^2_{\mathrm{oos}}$ and $BACC_{\mathrm{oos}}$ are expressed in "
+        r"percentages, and correlation coefficients are reported as decimals. The considered "
+        r"models include OLS or LOGIT (Linear), PLS, LASSO, ENET, random forests (RF), GBRT, XGBoost "
+        r"(XGB), and forecast combination (COMB). The table reports results for four target transformations: "
+        r"next-month value-weighted excess factor returns (Benchmark), cross-sectionally "
+        r"demeaned next-month factor returns (Cross-Reg), a binary outperformer indicator "
+        r"based on cross-sectionally demeaned returns (Cross-Class), and each factor's "
+        r"percentile rank within the monthly cross-section (Rank-Reg). For the regression "
+        r"targets, the correlation coefficients are computed between predicted and realized "
+        r"target values. For the classification target, they are computed between predicted "
+        r"outperformance probabilities and realized cross-sectionally demeaned returns. "
+        r"COMB is the equal-weighted average forecast across available models; for "
+        r"Cross-Class, it averages predicted outperformance probabilities. "
+        r"The sample comprises 153 factors from Jensen, Kelly, and Pedersen (2023); "
+        r"the forecasting sample runs from October 1971 to September 2024, "
+        r"and the out-of-sample testing period runs from October 1986 to September 2024."
+
     )
 
     def build_panel_rows(df, adj):
@@ -3529,16 +3763,26 @@ def latex_strat_perf(
     }
 
     notes = (
-        r"The table reports average realized returns for forecast-sorted factor portfolios "
-        r"using 153 U.S. factor returns over the out-of-sample period from October 1986 "
-        r"to September 2024. Each month, factors are sorted into ten portfolios based on "
-        r"model forecasts. Low and High denote the bottom and top forecast deciles, respectively. "
-        r"High--Low is the average return difference between the High and Low portfolios. "
-        r"Returns are in percent per month. "
-        r"COMB is the equal-weighted average forecast across available models; for classification, "
-        r"it averages predicted probabilities. "
-        r"ORACLE sorts on realized next-month returns and is therefore an ex-post, non-implementable benchmark."
-    )
+        r"This table reports monthly returns on decile portfolios of factor "
+        r"strategies formed on the predictions of machine learning models. The considered "
+        r"models include OLS or LOGIT (Linear), PLS, LASSO, ENET, random forests (RF), GBRT, XGBoost "
+        r"(XGB), forecast combination (COMB), and a perfect-foresight model (ORACLE). Low "
+        r"(High) indicates the decile of factors with the lowest (highest) predicted value. "
+        r"High--Low is the spread portfolio that assumes a long position in the High decile "
+        r"and a short position in the Low decile. All returns are expressed in percentages "
+        r"per month. The table reports results for four target transformations: next-month "
+        r"value-weighted excess factor returns (Benchmark), cross-sectionally demeaned "
+        r"next-month factor returns (Cross-Reg), a binary outperformer indicator based on "
+        r"cross-sectionally demeaned returns (Cross-Class), and each factor's percentile "
+        r"rank within the monthly cross-section (Rank-Reg). COMB is the equal-weighted "
+        r"average forecast across available models; for Cross-Class, it averages predicted "
+        r"outperformance probabilities. ORACLE sorts factors on realized next-month returns "
+        r"and therefore represents an ex-post perfect-foresight benchmark that is not "
+        r"implementable in real time. The sample comprises 153 factors from Jensen, Kelly, "
+        r"and Pedersen (2023); the forecasting sample runs from October 1971 to September "
+        r"2024, and the out-of-sample testing period runs from October 1986 to September "
+        r"2024."
+)
 
     def build_panel_rows(df, adj):
         df = df.clone()
@@ -3710,19 +3954,29 @@ def latex_strat_alphas(
     ]
 
     notes = (
-        r"The table reports monthly returns and alphas for long-short factor portfolios "
-        r"using 153 U.S. factor returns over the out-of-sample period from October 1986 "
-        r"to September 2024. Each month, the strategy is long the top forecast decile "
-        r"and short the bottom forecast decile. "
-        r"Returns and alphas are in percent per month; Newey--West t-statistics with six lags "
-        r"are in parentheses. "
-        r"$\alpha_{F6}$, $\alpha_{EW}$, and $\alpha_{\mathrm{Rnd}}$ are intercepts from "
-        r"time-series regressions of High--Low returns on the Fama--French six factors, "
-        r"the equal-weighted factor return, and the High--Low return of a random sorting "
-        r"strategy, respectively. "
-        r"COMB is the equal-weighted average forecast across available models; for classification, "
-        r"it averages predicted probabilities. "
-        r"ORACLE sorts on realized next-month returns and is therefore an ex-post, non-implementable benchmark."
+        r"This table reports monthly returns and alphas on High--Low portfolios of factor "
+        r"strategies formed on the predictions of machine learning models. The considered "
+        r"models include OLS or LOGIT (Linear), PLS, LASSO, ENET, random forests (RF), "
+        r"GBRT, XGBoost (XGB), forecast combination (COMB), and a perfect-foresight model "
+        r"(ORACLE). High--Low is the spread portfolio that assumes a long position in the "
+        r"decile of factors with the highest predicted value and a short position in the "
+        r"decile of factors with the lowest predicted value. "
+        r"$\alpha_{F6}$, $\alpha_{EW}$, and $\alpha_{\mathrm{R}}$ are alphas from the "
+        r"Fama--French six-factor model, the equal-weighted factor benchmark model, and "
+        r"the random-sorting benchmark model, respectively. All returns and alphas are "
+        r"expressed in percentages. The numbers in parentheses are Newey--West adjusted "
+        r"t-statistics with six lags. The table reports results for four target "
+        r"transformations: next-month value-weighted excess factor returns (Benchmark), "
+        r"cross-sectionally demeaned next-month factor returns (Cross-Reg), a binary "
+        r"outperformer indicator based on cross-sectionally demeaned returns (Cross-Class), "
+        r"and each factor's percentile rank within the monthly cross-section (Rank-Reg). "
+        r"COMB is the equal-weighted average forecast across available models; for "
+        r"Cross-Class, it averages predicted outperformance probabilities. ORACLE sorts "
+        r"factors on realized next-month returns and therefore represents an ex-post "
+        r"perfect-foresight benchmark that is not implementable in real time. The sample "
+        r"comprises 153 factors from Jensen, Kelly, and Pedersen (2023); the forecasting "
+        r"sample runs from October 1971 to September 2024, and the out-of-sample testing "
+        r"period runs from October 1986 to September 2024."
     )
 
     def fmt_pct(x):
@@ -3915,18 +4169,34 @@ def latex_strat_metrics(
     tabular_spec = "L{2cm}" + " ".join(["Z"] * len(models))
 
     notes = (
-        "The table reports backtest metrics for monthly long-short factor portfolios "
-        "using 153 U.S. factor returns over the out-of-sample period from October 1986 "
-        "to September 2024. Each month, the strategy is long the top forecast decile "
-        "and short the bottom forecast decile. "
-        "Return, volatility, average win, and average loss are in percent per month; "
-        "maximum drawdown and position turnover are in percent. "
-        "The Sharpe ratio is annualized from monthly returns. "
-        "Positive and negative months count months with positive and negative portfolio returns. "
-        "Trades per month counts average entries and exits in the long and short legs. "
-        "Position turnover is trades divided by active long and short positions. "
-        "COMB is the equal-weighted average forecast across available models; for classification, "
-        "it averages predicted probabilities."
+        r"This table reports backtest performance measures for High--Low portfolios of "
+        r"factor strategies formed on the predictions of machine learning models. The "
+        r"considered models include OLS or LOGIT (Linear), PLS, LASSO, ENET, random "
+        r"forests (RF), GBRT, XGBoost (XGB), and forecast combination (COMB). High--Low "
+        r"is the spread portfolio that assumes a long position in the decile of factors "
+        r"with the highest predicted value and a short position in the decile of factors "
+        r"with the lowest predicted value. Return is the average monthly High--Low return, "
+        r"Volatility is the annualized volatility of monthly High--Low returns, and the "
+        r"Sharpe ratio is annualized using monthly returns. Max. drawdown is the largest "
+        r"peak-to-trough decline in cumulative High--Low portfolio value. Positive months "
+        r"and Negative months report the number of months with positive and negative "
+        r"High--Low returns. Avg. Win and Avg. Loss are the average positive and negative "
+        r"monthly High--Low returns, respectively, and Reward-to-Risk is the ratio of "
+        r"Avg. Win to the absolute value of Avg. Loss. Trades per month is the average "
+        r"number of factor position entries and exits in the long and short legs. Position "
+        r"turnover is the average number of trades divided by the number of active long "
+        r"and short positions. Returns, volatility, maximum drawdown, average wins, "
+        r"average losses, and position turnover are expressed in percentages. The table "
+        r"reports results for four target transformations: next-month value-weighted "
+        r"excess factor returns (Benchmark), cross-sectionally demeaned next-month factor "
+        r"returns (Cross-Reg), a binary outperformer indicator based on cross-sectionally "
+        r"demeaned returns (Cross-Class), and each factor's percentile rank within the "
+        r"monthly cross-section (Rank-Reg). COMB is the equal-weighted average forecast "
+        r"across available models; for Cross-Class, it averages predicted outperformance "
+        r"probabilities. The sample comprises 153 factors from Jensen, Kelly, and "
+        r"Pedersen (2023); the forecasting sample runs from October 1971 to September "
+        r"2024, and the out-of-sample testing period runs from October 1986 to September "
+        r"2024."
     )
 
     lines = []
@@ -3997,6 +4267,241 @@ def latex_strat_metrics(
 
     return "\n".join(lines)
 
+def latex_strat_sent_metrics(
+    dfs,
+    adjs,
+    panel_titles,
+    period_order=("Bull", "Bear"),
+    panels_per_table: int = 2,
+    caption: str = "Backtest Metrics for Machine Learning Factor Portfolios in Bull and Bear Periods",
+    label: str = "tab:strat-metrics-bull-bear",
+    table_pos: str = "h",
+):
+    models = [
+        "OLS",
+        "PLS",
+        "LASSO",
+        "ENET",
+        "RF",
+        "GBRT",
+        "XGB",
+        "COMB",
+    ]
+
+    model_labels = {
+        "OLS": "Linear",
+        "PLS": "PLS",
+        "LASSO": "LASSO",
+        "ENET": "ENET",
+        "RF": "RF",
+        "GBRT": "GBRT",
+        "XGB": "XGB",
+        "COMB": "COMB",
+    }
+
+    metrics_to_show = [
+        "average_return",
+        "return_std",
+        "sharpe_ratio",
+        # "sortino_ratio",
+        "max_drawdown",
+        "wins",
+        "losses",
+        "average_win",
+        "average_loss",
+        "reward_to_risk_ratio",
+        "trades_per_month",
+        "turnover",
+    ]
+
+    metric_labels = {
+        "average_return": "Return",
+        "return_std": "Volatility",
+        "sharpe_ratio": "Sharpe ratio",
+        # "sortino_ratio": "Sortino ratio",
+        "max_drawdown": "Max. drawdown",
+        "wins": "Positive months",
+        "losses": "Negative months",
+        "average_win": "Avg. Win",
+        "average_loss": "Avg. Loss",
+        "reward_to_risk_ratio": "Reward-to-Risk",
+        "trades_per_month": "Trades per month",
+        "turnover": "Position turnover",
+    }
+
+    percent_metrics = {
+        "average_return",
+        "return_std",
+        "max_drawdown",
+        "average_win",
+        "average_loss",
+        "turnover",
+    }
+
+    integer_metrics = {
+        "wins",
+        "losses",
+    }
+
+    notes = (
+        r"This table reports backtest performance measures for High--Low factor portfolios "
+        r"formed from machine-learning predictions, separately for Bull and Bear periods. "
+        r"Bull and Bear months are defined by whether the Baker and Wurgler (2006) "
+        r"sentiment index is above or below its median. The considered models are OLS or "
+        r"LOGIT (Linear), PLS, LASSO, ENET, RF, GBRT, XGB, and COMB. High--Low is long "
+        r"the highest-forecast decile and short the lowest-forecast decile. Return is the "
+        r"average monthly return; volatility and Sharpe ratio are annualized from monthly "
+        r"returns. Max. drawdown is the largest cumulative peak-to-trough loss. Positive "
+        r"and negative months count months with positive and negative returns. Avg. Win "
+        r"and Avg. Loss are average positive and negative monthly returns; Reward-to-Risk "
+        r"is their absolute ratio. Trades per month counts average entries and exits; "
+        r"position turnover scales trades by active long and short positions. Percentage "
+        r"metrics are reported in percent. Results are shown for Benchmark, Cross-Reg, "
+        r"Cross-Class, and Rank-Reg targets. The sample comprises 153 "
+        r"factors from Jensen, Kelly, and Pedersen (2023); the forecasting sample runs "
+        r"from October 1971 to September 2024, and the out-of-sample testing period runs "
+        r"from October 1986 to September 2024."
+    )
+
+    def fmt(value, metric):
+        if pd.isna(value):
+            return "-"
+
+        if metric in percent_metrics:
+            return f"{100 * value:.2f}"
+
+        if metric in integer_metrics:
+            return f"{int(value)}"
+
+        if metric == "trades_per_month":
+            return f"{value:.2f}"
+
+        return f"{value:.3f}"
+
+    def to_pandas_safe(df):
+        if hasattr(df, "to_pandas"):
+            return df.to_pandas().copy()
+        return df.copy()
+
+    def clean_model_names(df, adj):
+        if adj == 2:
+            df = df.with_columns(
+                pl.col("model")
+                .str.replace("_CLS$", "")
+                .str.replace("^LOGIT$", "OLS")
+                .alias("model")
+            )
+        return df
+
+    def build_period_rows(df_pd, period_label):
+        rows = []
+
+        for metric in metrics_to_show:
+            row_vals = []
+
+            for model in models:
+                row_df = df_pd.loc[
+                    df_pd["model"].eq(model) & df_pd["period"].eq(period_label)
+                ]
+
+                if row_df.empty:
+                    row_vals.append("-")
+                else:
+                    value = row_df.iloc[0][metric]
+                    row_vals.append(fmt(value, metric))
+
+            row = metric_labels[metric]
+            row += " & " + " & ".join(row_vals)
+            row += r" \\"
+            rows.append(row)
+
+        return rows
+
+    def build_panel_rows(df, adj, panel_title):
+        df = clean_model_names(df, adj)
+        df_pd = to_pandas_safe(df)
+
+        rows = []
+
+        for p, period_label in enumerate(period_order):
+            if p > 0:
+                rows.append(r"\addlinespace[0.5em]")
+
+            rows.append(
+                rf"\multicolumn{{{n_cols}}}{{l}}{{\textbf{{{panel_title} -- {period_label}}}}} \\"
+            )
+
+            rows.extend(build_period_rows(df_pd, period_label))
+
+        return rows
+
+    def add_notes(lines):
+        lines.extend([
+            r"\bottomrule",
+            "",
+            r"\addlinespace[0.3em]",
+            rf"\multicolumn{{{n_cols}}}{{p{{\dimexpr\textwidth-2\tabcolsep\relax}}}}{{",
+            r"\scriptsize",
+            rf"\textbf{{Notes:}} {notes}}}\\",
+        ])
+
+    def chunks(x, n):
+        for start in range(0, len(x), n):
+            yield start, x[start:start + n]
+
+    n_cols = 1 + len(models)
+    tabular_spec = "L{2cm}" + " ".join(["Z"] * len(models))
+
+    table_blocks = []
+    zipped_panels = list(zip(dfs, adjs, panel_titles))
+
+    for chunk_start, panel_chunk in chunks(zipped_panels, panels_per_table):
+        table_index = chunk_start // panels_per_table
+        is_first_table = table_index == 0
+
+        if is_first_table:
+            this_caption = caption
+            this_label = label
+        else:
+            this_caption = rf"{caption} \textit{{(continued)}}"
+            this_label = f"{label}-continued-{table_index + 1}"
+
+        lines = [
+            rf"\begin{{table}}[{table_pos}]",
+            r"\centering",
+            rf"\caption{{{this_caption}}}",
+            rf"\label{{{this_label}}}",
+            r"\scriptsize",
+            r"\renewcommand{\arraystretch}{1.0}",
+            rf"\begin{{tabularx}}{{\textwidth}}{{{tabular_spec}}}",
+            r"\toprule",
+            " & " + " & ".join(
+                rf"\textbf{{{model_labels[m]}}}" for m in models
+            ) + r" \\",
+            r"\midrule",
+        ]
+
+        for i, (df, adj, title) in enumerate(panel_chunk):
+            if i > 0:
+                lines.append(r"\addlinespace[0.5em]")
+                lines.append(r"\midrule")
+
+            lines.extend(build_panel_rows(df, adj, title))
+
+        add_notes(lines)
+
+        lines.extend([
+            r"\end{tabularx}",
+            "",
+            r"\end{table}",
+        ])
+
+        table_blocks.append("\n".join(lines))
+
+        if chunk_start + panels_per_table < len(zipped_panels):
+            table_blocks.append(r"\newpage")
+
+    return "\n\n".join(table_blocks)
 
 def plot_cum_perf_buck(
         base_path,
@@ -4363,6 +4868,781 @@ def plot_cum_perf_hml(
         out_path = (
             plot_dir
             / f"{excntry}_{pfs}_{n_buckets}_cum_perf_hml.png"
+        )
+
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return out_path
+
+def latex_strat_sent_alphas(
+    dfs,
+    adjs,
+    panel_titles,
+    period_order=("Bull", "Bear"),
+    panels_per_table: int = 2,
+    caption: str = "Statistical Significance of Machine Learning Factor Portfolio Returns in Bull and Bear Periods",
+    label: str = "tab:strat-alphas-bull-bear-panels",
+):
+    model_order = ["OLS", "PLS", "LASSO", "ENET", "RF", "GBRT", "XGB", "COMB", "ORACLE"]
+
+    header_labels = {
+        "OLS": "Linear",
+        "PLS": "PLS",
+        "LASSO": "LASSO",
+        "ENET": "ENET",
+        "RF": "RF",
+        "GBRT": "GBRT",
+        "XGB": "XGB",
+        "COMB": "COMB",
+        "ORACLE": "ORACLE",
+    }
+
+    row_specs = [
+        ("alpha_mean", "tstat_mean", "High-Low"),
+        ("alpha_ff", "tstat_ff", r"$\alpha_{F6}$"),
+        ("alpha_ew", "tstat_ew", r"$\alpha_{EW}$"),
+        ("alpha_random", "tstat_random", r"$\alpha_{\mathrm{R}}$"),
+    ]
+
+    notes = (
+        r"This table reports monthly returns and alphas on High--Low portfolios of factor "
+        r"strategies formed on the predictions of machine learning models, separately for "
+        r"Bull and Bear periods. Bull and Bear periods are defined as months with high and "
+        r"low investor sentiment, respectively, based on whether the Baker and Wurgler "
+        r"(2006) sentiment index is above or below its median level. The considered models "
+        r"include OLS or LOGIT (Linear), PLS, LASSO, ENET, random forests (RF), GBRT, "
+        r"XGBoost (XGB), forecast combination (COMB), and a perfect-foresight model "
+        r"(ORACLE). High--Low is the spread portfolio that assumes a long position in the "
+        r"decile of factors with the highest predicted value and a short position in the "
+        r"decile of factors with the lowest predicted value. "
+        r"$\alpha_{F6}$, $\alpha_{EW}$, and $\alpha_{\mathrm{R}}$ are alphas from the "
+        r"Fama--French six-factor model, the equal-weighted factor benchmark model, and "
+        r"the random-sorting benchmark model, respectively. All returns and alphas are "
+        r"expressed in percentages. The numbers in parentheses are Newey--West adjusted "
+        r"t-statistics with six lags. The table reports results for four target "
+        r"transformations: next-month value-weighted excess factor returns (Benchmark), "
+        r"cross-sectionally demeaned next-month factor returns (Cross-Reg), a binary "
+        r"outperformer indicator based on cross-sectionally demeaned returns (Cross-Class), "
+        r"and each factor's percentile rank within the monthly cross-section (Rank-Reg). "
+        r"COMB is the equal-weighted average forecast across available models; for "
+        r"Cross-Class, it averages predicted outperformance probabilities. ORACLE sorts "
+        r"factors on realized next-month returns and therefore represents an ex-post "
+        r"perfect-foresight benchmark that is not implementable in real time. The sample "
+        r"comprises 153 factors from Jensen, Kelly, and Pedersen (2023); the forecasting "
+        r"sample runs from October 1971 to September 2024, and the out-of-sample testing "
+        r"period runs from October 1986 to September 2024."
+    )
+
+    def fmt_pct(x):
+        if x is None:
+            return "-"
+        return f"{float(x) * 100:.2f}"
+
+    def fmt_t(x):
+        if x is None:
+            return "-"
+        return f"({float(x):.2f})"
+
+    def clean_model_names(df, adj):
+        if adj == 2:
+            df = df.with_columns(
+                pl.col("model")
+                .str.replace("_CLS$", "")
+                .str.replace("^LOGIT$", "OLS")
+                .alias("model")
+            )
+        return df
+
+    def build_period_rows(row_map, period_label):
+        rows = []
+
+        for j, (value_col, tstat_col, row_label) in enumerate(row_specs):
+            value_cells = []
+            tstat_cells = []
+
+            for model in model_order:
+                row = row_map.get((model, period_label), None)
+
+                if row is None:
+                    value_cells.append("-")
+                    tstat_cells.append("-")
+                else:
+                    value_cells.append(fmt_pct(row.get(value_col)))
+                    tstat_cells.append(fmt_t(row.get(tstat_col)))
+
+            if j > 0:
+                rows.append(r"\addlinespace[0.4em]")
+
+            rows.append(row_label + " & " + " & ".join(value_cells) + r" \\")
+            rows.append(" & " + " & ".join(tstat_cells) + r" \\")
+
+        return rows
+
+    def build_panel_rows(df, adj, panel_title):
+        df = clean_model_names(df.clone(), adj)
+
+        row_map = {
+            (row["model"], row["period"]): row
+            for row in df.iter_rows(named=True)
+        }
+
+        rows = []
+
+        for p, period_label in enumerate(period_order):
+            if p > 0:
+                rows.append(r"\addlinespace[0.5em]")
+
+            rows.append(
+                rf"\multicolumn{{{n_cols}}}{{l}}{{\textbf{{{panel_title} -- {period_label}}}}} \\"
+            )
+
+            rows.extend(build_period_rows(row_map, period_label))
+
+        return rows
+
+    def add_notes(lines):
+        lines.extend([
+            r"\bottomrule",
+            "",
+            r"\addlinespace[0.3em]",
+            rf"\multicolumn{{{n_cols}}}{{p{{\dimexpr\textwidth-2\tabcolsep\relax}}}}{{",
+            r"\scriptsize",
+            rf"\textbf{{Notes:}} {notes}}}\\",
+        ])
+
+    def chunks(x, n):
+        for start in range(0, len(x), n):
+            yield start, x[start:start + n]
+
+    col_spec = "C{1.8cm} " + " ".join(["Z"] * len(model_order))
+    n_cols = 1 + len(model_order)
+
+    table_blocks = []
+    zipped_panels = list(zip(dfs, adjs, panel_titles))
+
+    for chunk_start, panel_chunk in chunks(zipped_panels, panels_per_table):
+        table_index = chunk_start // panels_per_table
+        is_first_table = table_index == 0
+
+        if is_first_table:
+            this_caption = caption
+            this_label = label
+        else:
+            this_caption = rf"{caption} \textit{{(continued)}}"
+            this_label = f"{label}-continued-{table_index + 1}"
+
+        lines = [
+            r"\begin{table}[h]",
+            r"\centering",
+            rf"\caption{{{this_caption}}}",
+            rf"\label{{{this_label}}}",
+            r"\scriptsize",
+            r"\renewcommand{\arraystretch}{1.0}",
+            rf"\begin{{tabularx}}{{\textwidth}}{{{col_spec}}}",
+            r"\toprule",
+            " & " + " & ".join(
+                rf"\textbf{{{header_labels[model]}}}" for model in model_order
+            ) + r" \\",
+            r"\midrule",
+        ]
+
+        for i, (df, adj, title) in enumerate(panel_chunk):
+            if i > 0:
+                lines.append(r"\addlinespace[0.5em]")
+                lines.append(r"\midrule")
+
+            lines.extend(build_panel_rows(df, adj, title))
+
+        add_notes(lines)
+
+        lines.extend([
+            r"\end{tabularx}",
+            "",
+            r"\end{table}",
+        ])
+
+        table_blocks.append("\n".join(lines))
+
+        if chunk_start + panels_per_table < len(zipped_panels):
+            table_blocks.append(r"\clearpage")
+
+    return "\n\n".join(table_blocks)
+
+
+def plot_variable_importance(
+        base_path,
+        data_path,
+        excntry,
+        pfs,
+        adj,
+        top_n=10,
+        save=True,
+        show=False):
+
+
+    suffix = get_suffix(adj)
+
+    base = data_path / "ml_model_output"
+    vi_path = base / f"{excntry}_{pfs}_vi_month{suffix}.parquet"
+
+    plot_dir = base_path / "exhibits"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    vi = (
+        pl.read_parquet(vi_path)
+        .filter(
+            (pl.col("country") == excntry) &
+            (pl.col("pfs") == pfs)
+        )
+    )
+
+    if adj == 2:
+        vi = vi.with_columns(
+            pl.col("model")
+            .str.replace("_CLS$", "")
+            .str.replace("^LOGIT$", "OLS")
+            .alias("model")
+        )
+
+    vi = (
+        vi
+        .filter(
+            (pl.col("model") != "ORACLE") &
+            (pl.col("model") != "RANDOM")
+        )
+        .group_by(["model", "feature"])
+        .agg(
+            pl.col("importance").mean().alias("importance")
+        )
+        .with_columns(
+            pl.col("model")
+            .str.replace("^OLS$", "Linear")
+            .alias("model")
+        )
+    )
+
+    available_models = vi.select("model").unique()["model"].to_list()
+
+    preferred_order = [
+        "Linear", "PLS", "LASSO", "ENET",
+        "RF", "GBRT", "XGB", "FFNN", "COMB"
+    ]
+
+    models = [m for m in preferred_order if m in available_models]
+
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=4,
+        figsize=(9.4, 5.6)
+    )
+
+    axes = axes.flatten()
+
+    if len(models) == 7:
+        plot_axes = [
+            axes[0], axes[1], axes[2],
+            axes[4], axes[5], axes[6], axes[7]
+        ]
+    else:
+        plot_axes = axes[:min(len(models), len(axes))]
+
+    bar_color = "#6BAED6"
+
+    for ax, model in zip(plot_axes, models):
+
+        plot_df = (
+            vi
+            .filter(pl.col("model") == model)
+            .sort("importance", descending=True)
+            .head(top_n)
+            .sort("importance")
+        )
+
+        if plot_df.height == 0:
+            ax.set_visible(False)
+            continue
+
+        df_plot = plot_df.to_pandas()
+
+        ax.barh(
+            df_plot["feature"],
+            df_plot["importance"],
+            color=bar_color,
+            edgecolor=bar_color,
+            height=0.65
+        )
+
+        max_imp = float(df_plot["importance"].max())
+        
+        if max_imp <= 0.05:
+            xmax = 0.05
+            xticks = [0.00, 0.025, 0.05]
+        elif max_imp <= 0.10:
+            xmax = 0.10
+            xticks = [0.00, 0.05, 0.10]
+        elif max_imp <= 0.15:
+            xmax = 0.15
+            xticks = [0.00, 0.05, 0.10, 0.15]
+        elif max_imp <= 0.20:
+            xmax = 0.20
+            xticks = [0.00, 0.05, 0.10, 0.15, 0.20]
+        elif max_imp <= 0.30:
+            xmax = 0.30
+            xticks = [0.00, 0.10, 0.20, 0.30]
+        elif max_imp <= 0.40:
+            xmax = 0.40
+            xticks = [0.00, 0.10, 0.20, 0.30, 0.40]
+        elif max_imp <= 0.60:
+            xmax = 0.60
+            xticks = [0.00, 0.20, 0.40, 0.60]
+        else:
+            xmax = round(max_imp * 1.15, 1)
+            xticks = [x / 10 for x in range(0, int(xmax * 10) + 1, 2)]
+
+        ax.set_xlim(0, xmax)
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([f"{x:.2f}" for x in xticks], fontsize=8)
+
+        ax.set_title(
+            model,
+            fontsize=7,
+            fontweight="bold",
+            pad=4
+        )
+
+        ax.tick_params(axis="y", labelsize=7, length=0)
+        ax.tick_params(axis="x", labelsize=8, length=3, pad=1)
+
+        ax.grid(
+            axis="x",
+            linestyle="--",
+            linewidth=0.8,
+            alpha=0.55
+        )
+
+        ax.set_axisbelow(True)
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        ax.spines["left"].set_linewidth(0.7)
+        ax.spines["bottom"].set_linewidth(0.7)
+
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+
+    used_axes = set(plot_axes)
+
+    for ax in axes:
+        if ax not in used_axes:
+            ax.set_visible(False)
+
+    fig.subplots_adjust(
+        left=0.125,
+        right=0.970,
+        top=0.810,
+        bottom=0.080,
+        wspace=1.15,
+        hspace=0.42
+    )
+
+
+    out_path = None
+
+    if save:
+        out_path = (
+            plot_dir
+            / f"{excntry}_{pfs}_var_imp{suffix}.png"
+        )
+
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return out_path
+
+
+def plot_agg_variable_importance_old(
+        base_path,
+        data_path,
+        excntry,
+        pfs,
+        adj,
+        top_ks=(3, 5, 10),
+        save=True,
+        show=False):
+
+
+    suffix = get_suffix(adj)
+
+    base = data_path / "ml_model_output"
+    vi_path = base / f"{excntry}_{pfs}_vi_month{suffix}.parquet"
+
+    plot_dir = base_path / "exhibits"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    vi = (
+        pl.read_parquet(vi_path)
+        .filter(
+            (pl.col("country") == excntry) &
+            (pl.col("pfs") == pfs)
+        )
+    )
+
+    if adj == 2:
+        vi = vi.with_columns(
+            pl.col("model")
+            .str.replace("_CLS$", "")
+            .str.replace("^LOGIT$", "OLS")
+            .alias("model")
+        )
+
+    vi = (
+        vi
+        .filter(
+            (pl.col("model") != "ORACLE") &
+            (pl.col("model") != "RANDOM")
+        )
+        .group_by(["model", "feature"])
+        .agg(
+            pl.col("importance").mean().alias("importance")
+        )
+    )
+
+    available_models = vi.select("model").unique()["model"].to_list()
+
+    preferred_order = [
+        "OLS", "PLS", "LASSO", "ENET",
+        "RF", "GBRT", "XGB", "FFNN", "COMB"
+    ]
+
+    models = [m for m in preferred_order if m in available_models]
+
+    if len(models) == 0:
+        raise ValueError(f"No valid models found in {vi_path}")
+
+    rows = []
+
+    for model in models:
+
+        model_vi = (
+            vi
+            .filter(pl.col("model") == model)
+            .sort("importance", descending=True)
+        )
+
+        for k in top_ks:
+
+            agg_imp = (
+                model_vi
+                .head(k)
+                .select(pl.col("importance").sum())
+                .item()
+            )
+
+            rows.append({
+                "model": model,
+                "top_k": f"Top {k}",
+                "k": k,
+                "importance": agg_imp
+            })
+
+    df = pl.DataFrame(rows).to_pandas()
+
+    fig, ax = plt.subplots(
+        figsize=(7.2, 4.4)
+    )
+
+    x = list(range(len(models)))
+    n_groups = len(top_ks)
+    bar_width = 0.22
+
+    colors = {
+        3: "#BDD7E7",
+        5: "#6BAED6",
+        10: "#2171B5"
+    }
+
+    for i, k in enumerate(top_ks):
+
+        tmp = df[df["k"] == k].set_index("model").loc[models].reset_index()
+
+        offset = (i - (n_groups - 1) / 2) * bar_width
+
+        bars = ax.bar(
+            [v + offset for v in x],
+            tmp["importance"],
+            width=bar_width,
+            color=colors.get(k, None),
+            label=f"Top {k}"
+        )
+
+        for bar, value in zip(bars, tmp["importance"]):
+
+            label = f"{value * 100:.0f}%"
+
+            if value >= 0.25:
+                text_color = "white"
+                y_pos = value - 0.025
+                va = "top"
+            else:
+                text_color = "black"
+                y_pos = value + 0.012
+                va = "bottom"
+
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                y_pos,
+                label,
+                ha="center",
+                va=va,
+                fontsize=9,
+                color=text_color
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(models, fontsize=9)
+
+    ax.set_ylabel(
+        "Aggregate Contribution Importance",
+        fontsize=9,
+        fontweight="bold"
+    )
+
+    ax.set_ylim(0, max(df["importance"].max() * 1.18, 0.10))
+
+    ax.tick_params(axis="y", left=False, labelleft=False)
+    ax.tick_params(axis="x", length=0)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_linewidth(0.8)
+
+    ax.grid(False)
+
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.22),
+        ncol=len(top_ks),
+        frameon=True,
+        edgecolor="black",
+        fancybox=False,
+        fontsize=9
+    )
+
+    fig.subplots_adjust(
+        left=0.12,
+        right=0.98,
+        top=0.93,
+        bottom=0.22
+    )
+
+    out_path = None
+
+    if save:
+        out_path = (
+            plot_dir
+            / f"{excntry}_{pfs}_agg_var_imp{suffix}.png"
+        )
+
+        fig.savefig(out_path, dpi=300, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return out_path
+
+def plot_agg_variable_importance(
+        base_path,
+        data_path,
+        excntry,
+        pfs,
+        adj,
+        top_ks=(3, 5, 10),
+        save=True,
+        show=False):
+
+
+    suffix = get_suffix(adj)
+
+    base = data_path / "ml_model_output"
+    vi_path = base / f"{excntry}_{pfs}_vi_month{suffix}.parquet"
+
+    plot_dir = base_path / "exhibits"
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    vi = (
+        pl.read_parquet(vi_path)
+        .filter(
+            (pl.col("country") == excntry) &
+            (pl.col("pfs") == pfs)
+        )
+    )
+
+    if adj == 2:
+        vi = vi.with_columns(
+            pl.col("model")
+            .str.replace("_CLS$", "")
+            .str.replace("^LOGIT$", "OLS")
+            .alias("model")
+        )
+
+    vi = (
+        vi
+        .filter(
+            (pl.col("model") != "ORACLE") &
+            (pl.col("model") != "RANDOM")
+        )
+        .group_by(["model", "feature"])
+        .agg(
+            pl.col("importance").mean().alias("importance")
+        )
+    )
+
+    available_models = vi.select("model").unique()["model"].to_list()
+
+    preferred_order = [
+        "OLS", "PLS", "LASSO", "ENET",
+        "RF", "GBRT", "XGB", "FFNN", "COMB"
+    ]
+
+    models = [m for m in preferred_order if m in available_models]
+
+    if len(models) == 0:
+        raise ValueError(f"No valid models found in {vi_path}")
+
+    rows = []
+
+    for model in models:
+
+        model_vi = (
+            vi
+            .filter(pl.col("model") == model)
+            .sort("importance", descending=True)
+        )
+
+        for k in top_ks:
+
+            agg_imp = (
+                model_vi
+                .head(k)
+                .select(pl.col("importance").sum())
+                .item()
+            )
+
+            rows.append({
+                "model": model,
+                "top_k": f"Top {k}",
+                "k": k,
+                "importance": agg_imp
+            })
+
+    df = pl.DataFrame(rows).to_pandas()
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    x = list(range(len(models)))
+    n_groups = len(top_ks)
+    bar_width = 0.29
+
+    colors = {
+        3: "#BDD7E7",
+        5: "#6BAED6",
+        10: "#2171B5"
+    }
+
+    max_y = df["importance"].max()
+    y_offset = max_y * 0.025
+
+    for i, k in enumerate(top_ks):
+
+        tmp = df[df["k"] == k].set_index("model").loc[models].reset_index()
+
+        offset = (i - (n_groups - 1) / 2) * bar_width
+
+        bars = ax.bar(
+            [v + offset for v in x],
+            tmp["importance"],
+            width=bar_width,
+            color=colors.get(k, None),
+            label=f"Top {k}",
+            zorder=2
+        )
+
+        for bar, value in zip(bars, tmp["importance"]):
+
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                value + y_offset,
+                f"{value * 100:.0f}%",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+                color="black",
+                clip_on=False,
+                zorder=3
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(models, fontsize=9)
+
+    for i in range(len(models) - 1):
+        ax.axvline(
+            x=i + 0.5,
+            ymin=0.00,
+            ymax=0.92,
+            color="0.75",
+            linewidth=0.8,
+            linestyle="-",
+            zorder=0
+        )
+
+    ax.set_ylim(0, max_y * 1.18)
+
+    ax.tick_params(axis="y", left=False, labelleft=False)
+    ax.tick_params(axis="x", length=0)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_linewidth(0.8)
+
+    ax.grid(False)
+
+    ax.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.22),
+        ncol=len(top_ks),
+        frameon=True,
+        edgecolor="black",
+        fancybox=False,
+        fontsize=9
+    )
+
+    fig.subplots_adjust(
+        left=0.12,
+        right=0.98,
+        top=0.88,
+        bottom=0.22
+    )
+
+    out_path = None
+
+    if save:
+        out_path = (
+            plot_dir
+            / f"{excntry}_{pfs}_agg_var_imp{suffix}.png"
         )
 
         fig.savefig(out_path, dpi=300, bbox_inches="tight")

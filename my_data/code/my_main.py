@@ -19,14 +19,20 @@ from my_aux_functions import(
     eval_model,
     build_strategy_returns,
     eval_strategy_returns,
-    eval_strategy_returns_period,
+    eval_strategy_returns_sent,
     compute_backtest_metrics,
+    compute_backtest_metrics_sent,
     plot_cum_perf_buck,
     plot_cum_perf_hml,
     latex_pred_perf,
     latex_strat_perf,
     latex_strat_alphas,
-    latex_strat_metrics)
+    latex_strat_sent_alphas,
+    latex_strat_metrics,
+    latex_strat_sent_metrics,
+    plot_variable_importance,
+    plot_agg_variable_importance
+    )
 
 BASE_DIR = Path.home()/"Desktop"/"Master_Thesis"/"my_data"
 CODE_DIR = BASE_DIR / "code"
@@ -122,7 +128,7 @@ ml_pred_gl = {}
 ml_imp_gl = {}
 
 for cntry in ["USA"]:
-        for pfs in [10, 3, 4]:
+        for pfs in [10]:#, 3, 4
             for adjust in [0, 1, 2, 3]:
 
                 key = (cntry, pfs, adjust)
@@ -138,8 +144,8 @@ ml_imp_w_comb = {}
 ml_imp_gl_w_comb = {}
 
 for cntry in ["USA"]:
-        for pfs in [10, 3, 4]:
-            for adjust in [0, 1, 2]: #, 3
+        for pfs in [10]: #, 3, 4
+            for adjust in [0, 1, 2, 3]: #
 
                 key = (cntry, pfs, adjust)
             
@@ -154,21 +160,21 @@ for cntry in ["USA"]:
 buck_ret_avg_gl = {}
 buck_ret_avg_mo = {}
 buck_ret_ts = {}
-buck_ret_per_mo = {}
-buck_ret_per_gl = {}
+buck_ret_sent_mo = {}
+buck_ret_sent_gl = {}
 
 for cntry in ["USA"]:
      for pfs in [10]:#, 3, 4
          for n_buck in [10]: #, 3, 4
-                 for adjust in [0, 1, 2]:#, 3
+                 for adjust in [0, 1, 2, 3]:#, 3
                    
                    key = (cntry, pfs, n_buck, adjust)
 
                    print(key)
 
                    (buck_ret_avg_gl[key], buck_ret_avg_mo[key],
-                    buck_ret_ts[key], buck_ret_per_mo[key],
-                    buck_ret_per_gl[key]) = build_strategy_returns(
+                    buck_ret_ts[key], buck_ret_sent_mo[key],
+                    buck_ret_sent_gl[key]) = build_strategy_returns(
                         data_path=DATA_DIR, excntry=cntry, pfs=pfs,n_buckets=n_buck,adj=adjust)
 
  #%%
@@ -180,7 +186,7 @@ regress_buck_gl = {}
 for cntry in ["USA"]:
     for pfs in [10]:#, 3, 4
         for n_buck in [10]: #, 3, 4
-            for adjust in [0, 1, 2]: #, 3
+            for adjust in [0, 1, 2, 3]: #, 3
                 
                 key = (cntry, pfs, n_buck, adjust)
 
@@ -191,19 +197,19 @@ for cntry in ["USA"]:
                     data_path=DATA_DIR, excntry = cntry, pfs = pfs, n_buckets=n_buck, adj=adjust)
 
 #%%
-# Report Alphas and T stats for Crashes
-regress_strat_gl_crash = {}
+# Report Alphas and T stats for Bull vs Bear
+regress_strat_sent_gl = {}
 
 for cntry in ["USA"]:
-    for pfs in [10, 3, 4]:
-        for n_buck in [10, 3, 4]:
-            for adjust in [0, 1, 2, 3]:
+    for pfs in [10]:#, 3, 4
+        for n_buck in [10]:#, 3, 4
+            for adjust in [0, 1, 2, 3]:#, 3
 
                 key = (cntry, pfs, n_buck, adjust)
 
                 print(key)
 
-                regress_strat_gl_crash[key] = eval_strategy_returns_period(
+                regress_strat_sent_gl[key] = eval_strategy_returns_sent(
                      data_path=DATA_DIR, excntry = cntry, pfs = pfs, n_buckets=n_buck, adj=adjust)
 # %%
 # Backtest Metrics
@@ -213,7 +219,7 @@ bt_month = {}
 for cntry in ["USA"]:
     for pfs in [10]:#, 3, 4
         for n_buck in [10]:#, 3, 4
-            for adjust in [0, 1, 2]:#, 3
+            for adjust in [0, 1, 2, 3]:#, 3
 
                 key = (cntry, pfs, n_buck, adjust)
 
@@ -221,21 +227,38 @@ for cntry in ["USA"]:
 
                 bt_month[key], bt_metrics_gl[key] = compute_backtest_metrics(
                      data_path=DATA_DIR, excntry = cntry, pfs = pfs, n_buckets=n_buck, adj=adjust)
+                
 
+# %%
+# Backtest Metrics in Bull vs Bear Markets
+bt_metrics_sent_gl = {}
+bt_sent_month = {}
+
+for cntry in ["USA"]:
+    for pfs in [10]:#, 3, 4
+        for n_buck in [10]:#, 3, 4
+            for adjust in [0, 1, 2, 3]:#, 3
+
+                key = (cntry, pfs, n_buck, adjust)
+
+                print(key)
+
+                bt_sent_month[key], bt_metrics_sent_gl[key] = compute_backtest_metrics_sent(
+                     data_path=DATA_DIR, excntry = cntry, pfs = pfs, n_buckets=n_buck, adj=adjust)
 # %% Predictive Performance for the Cross Section of Factor Returns
 print(latex_pred_perf(
         dfs=[
             ml_pred_gl_w_comb["USA", 10, 0],
             ml_pred_gl_w_comb["USA", 10, 1],
             ml_pred_gl_w_comb["USA", 10, 2],
-            #ml_pred_gl_w_comb["USA", 10, 3],
+            ml_pred_gl_w_comb["USA", 10, 3],
         ],
-        adjs=[0, 1, 2], #3
+        adjs=[0, 1, 2, 3], #3
         panel_titles=[
             "Benchmark",
             "Cross-Reg",
             "Cross-Class",
-            #"Rank-Reg",
+            "Rank-Reg",
         ],
     )
 )
@@ -247,14 +270,14 @@ print(
             buck_ret_avg_gl["USA", 10, 10, 0],
             buck_ret_avg_gl["USA", 10, 10, 1],
             buck_ret_avg_gl["USA", 10, 10, 2],
-            #buck_ret_avg_gl["USA", 10, 10, 3],
+            buck_ret_avg_gl["USA", 10, 10, 3],
         ],
-        adjs=[0, 1, 2], #, 3
+        adjs=[0, 1, 2, 3], #, 3
         panel_titles=[
             "Benchmark",
             "Cross-Reg",
             "Cross-Class",
-            #"Rank-Reg",
+            "Rank-Reg",
         ]
     )
 )
@@ -265,35 +288,37 @@ print(
             regress_strat_gl["USA", 10, 10, 0],
             regress_strat_gl["USA", 10, 10, 1],
             regress_strat_gl["USA", 10, 10, 2],
-            #regress_strat_gl["USA", 10, 10, 3],
+            regress_strat_gl["USA", 10, 10, 3],
         ],
-        adjs=[0, 1, 2], #, 3
+        adjs=[0, 1, 2, 3], #, 3
         panel_titles=[
             "Benchmark",
             "Cross-Reg",
             "Cross-Class",
-            #"Rank-Reg",
+            "Rank-Reg",
         ]
     )
 )
-# %%
+
+# %% Backtest Metrics 
 print(
     latex_strat_metrics(
         dfs=[
             bt_metrics_gl["USA", 10, 10, 0],
             bt_metrics_gl["USA", 10, 10, 1],
             bt_metrics_gl["USA", 10, 10, 2],
-            # bt_metrics_gl["USA", 10, 10, 3],
+            bt_metrics_gl["USA", 10, 10, 3],
         ],
-        adjs=[0, 1, 2],
+        adjs=[0, 1, 2, 3],
         panel_titles=[
             "Benchmark",
             "Cross-Reg",
             "Cross-Class",
-            # "Rank-Reg",
+            "Rank-Reg",
         ]
     )
 )
+
 
 # %% Cumualtive Performance
 plot_paths = {}
@@ -301,7 +326,7 @@ plot_paths = {}
 for cntry in ["USA"]:
     for pfs in [10]:#, 3, 4
         for n_buck in [10]: #, 3, 4
-            for adjust in [0, 1, 2]: #, 3
+            for adjust in [0, 1, 2, 3]: #, 3
 
                 key = (cntry, pfs, n_buck, adjust)
 
@@ -327,13 +352,71 @@ for cntry in ["USA"]:
                     excntry=cntry,
                     pfs=pfs,
                     n_buckets=n_buck,
-                    adjs=(0, 1, 2),
+                    adjs=(0, 1, 2, 3),
                     adj_labels={
                             0: "Benchmark",
                             1: "Cross-Reg",
-                            2: "Cross-Class."
+                            2: "Cross-Class",
+                            3: "Rank-Reg"
                         },
                         save=True,
                         show=True
                     )
+# %% Statistical Significance in Bull vs Bear
+
+print(latex_strat_sent_alphas(
+    dfs=[
+        regress_strat_sent_gl["USA", 10, 10, 0],
+        regress_strat_sent_gl["USA", 10, 10, 1],
+        regress_strat_sent_gl["USA", 10, 10, 2],
+        regress_strat_sent_gl["USA", 10, 10, 3]
+    ],
+    adjs=[0, 1, 2, 3],
+    panel_titles=["Benchmark", "Cross-Reg", "Cross-Class", "Rank-Reg"],
+))
+
+
+# %% Backtest Metrics in Bull vs Bear
+print(
+    latex_strat_sent_metrics(
+    dfs=[
+        bt_metrics_sent_gl["USA", 10, 10, 0],
+        bt_metrics_sent_gl["USA", 10, 10, 1],
+        bt_metrics_sent_gl["USA", 10, 10, 2],
+        bt_metrics_sent_gl["USA", 10, 10, 3]
+    ],
+    adjs=[0, 1, 2, 3],
+    panel_titles=["Benchmark", "Cross-Reg", "Cross-Class", "Rank-Reg"],
+))
+# %%
+vi_plot_paths = {}
+
+for cntry in ["USA"]:
+    for pfs in [10]:#, 3, 4
+            for adjust in [0, 1, 2, 3]: #, 3
+
+                key = (cntry, pfs, adjust)
+
+                print(key)
+
+                vi_plot_paths[key] = plot_variable_importance(
+                    data_path=DATA_DIR,base_path= BASE_DIR, excntry=cntry, pfs=pfs,
+                    adj=adjust, save=True, show=True
+                )
+
+# %%
+vi_agg_plot_paths = {}
+
+for cntry in ["USA"]:
+    for pfs in [10]:#, 3, 4
+            for adjust in [0, 1, 2, 3]: #, 3
+
+                key = (cntry, pfs, adjust)
+
+                print(key)
+
+                vi_agg_plot_paths[key] = plot_agg_variable_importance(
+                    data_path=DATA_DIR,base_path= BASE_DIR, excntry=cntry, pfs=pfs,
+                    adj=adjust, save=True, show=True
+                )
 # %%
